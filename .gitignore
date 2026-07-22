@@ -1,6 +1,6 @@
 logs/
 datasets/
-test-results/
+test/results/
 .remote-gpu-managed
 lightning_logs/
 wandb/
