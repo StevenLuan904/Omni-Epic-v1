@@ -34,9 +34,11 @@ from pepflow.modules.protein.writers import save_pdb
 
 # testset
 names = []
-with open('/datapool/data2/home/ruihan/data/jiahan/ResProj/PepDiff/pepflowww/Data/names.txt','r') as f:
-    for line in f:
-        names.append(line.strip())
+names_path = '/datapool/data2/home/ruihan/data/jiahan/ResProj/PepDiff/pepflowww/Data/names.txt'
+if os.path.isfile(names_path):
+    with open(names_path, 'r') as f:
+        for line in f:
+            names.append(line.strip())
     
 def preprocess_structure(task):
 
