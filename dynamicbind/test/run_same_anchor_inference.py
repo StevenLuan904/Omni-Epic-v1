@@ -168,7 +168,7 @@ def main():
     args = parser.parse_args()
 
     require_clean_commit()
-    python = Path(args.python).resolve()
+    python = Path(os.path.abspath(args.python))
     inputs_csv = Path(args.inputs_csv).resolve()
     esm_embeddings = Path(args.esm_embeddings).resolve()
     model_dir = Path(args.model_dir).resolve()
