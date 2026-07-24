@@ -323,7 +323,12 @@ def circular_difference(first, second):
 
 
 def pair_metrics(first, second):
-    common = sorted(set(first["protein"]["residues"]) & set(second["protein"]["residues"]))
+    shared_keys = set(first["protein"]["residues"]) & set(second["protein"]["residues"])
+    common = sorted(
+        key for key in shared_keys
+        if first["protein"]["residues"][key]["resname"]
+        == second["protein"]["residues"][key]["resname"]
+    )
     if len(common) < 20:
         raise ValueError(f"only {len(common)} common CA residues")
     first_ca = np.asarray([first["protein"]["residues"][key]["atoms"]["CA"] for key in common])
@@ -367,7 +372,15 @@ def pair_metrics(first, second):
     ]
     mean_resolution = float(np.mean(resolution_values)) if resolution_values else math.nan
     gap_penalty = abs(first["filled_num"]) + abs(second["filled_num"])
-    clean_score = pocket_rmsd * (0.5 + overlap) / (1.0 + 0.02 * gap_penalty)
+    clean_score = (
+        pocket_rmsd
+        * overlap
+        / (
+            (1.0 + all_ca_rmsd)
+            * (1.0 + ligand_centroid_distance / 8.0)
+            * (1.0 + 0.02 * gap_penalty)
+        )
+    )
     return {
         "uid": first["uid"],
         "entry_a": first["entry"],
@@ -463,9 +476,13 @@ def load_records(csv_path, archive_path, cutoff, include_groups):
 
 def select_candidates(pair_table, count):
     eligible = pair_table[
-        (pair_table["pocket_union_residues"] >= 5)
-        & (pair_table["pocket_site_jaccard"] >= 0.35)
-        & (pair_table["holo_pocket_ca_rmsd"] >= 1.0)
+        (pair_table["common_ca"] >= 80)
+        & (pair_table["pocket_union_residues"] >= 8)
+        & (pair_table["pocket_site_jaccard"] >= 0.60)
+        & (pair_table["holo_pocket_ca_rmsd"].between(1.0, 5.0))
+        & (pair_table["holo_all_ca_rmsd"] <= 3.0)
+        & (pair_table["ligand_centroid_distance"] <= 8.0)
+        & (pair_table["mean_resolution"] <= 3.0)
     ].sort_values(["clean_score", "holo_pocket_ca_rmsd"], ascending=False)
     selected = []
     used_uids = set()
@@ -477,7 +494,14 @@ def select_candidates(pair_table, count):
         if len(selected) >= count:
             break
     if len(selected) < count:
-        fallback = pair_table.sort_values(
+        fallback = pair_table[
+            (pair_table["common_ca"] >= 50)
+            & (pair_table["pocket_union_residues"] >= 5)
+            & (pair_table["pocket_site_jaccard"] >= 0.50)
+            & (pair_table["holo_pocket_ca_rmsd"].between(1.0, 6.0))
+            & (pair_table["holo_all_ca_rmsd"] <= 4.0)
+            & (pair_table["ligand_centroid_distance"] <= 10.0)
+        ].sort_values(
             ["clean_score", "holo_pocket_ca_rmsd"], ascending=False
         )
         for _, row in fallback.iterrows():
@@ -734,16 +758,18 @@ def main():
         strong_two = int((overlap & (pair_table["holo_pocket_ca_rmsd"] > 2)).sum())
         if strong_two >= 10:
             interpretation = (
-                "MDT contains a substantial set of same-protein, overlapping-site holo pairs "
-                "with backbone differences above 2 Å. This is consistent with a real "
-                "ligand-associated conformational signal rather than only alternate binding "
-                "sites, but crystal/construct effects remain possible confounders."
+                f"{args.dataset_label} contains a substantial set of same-protein, "
+                "overlapping-site holo pairs with backbone differences above 2 Å. This "
+                "structural heterogeneity is compatible with a ligand-associated signal, "
+                "but ligand causality and crystal/construct confounders require the Day 2 "
+                "same-anchor test."
             )
         elif strong_one >= 10:
             interpretation = (
-                "MDT contains repeated same-protein, overlapping-site holo pairs above 1 Å, "
-                "but large >2 Å transitions are limited. The signal is suitable for a cautious "
-                "same-anchor inference test, not yet for a broad state-selection claim."
+                f"{args.dataset_label} contains repeated same-protein, overlapping-site holo "
+                "pairs above 1 Å, but large >2 Å transitions are limited. The signal is "
+                "suitable for a cautious same-anchor inference test, not yet for a broad "
+                "state-selection claim."
             )
         else:
             interpretation = (
