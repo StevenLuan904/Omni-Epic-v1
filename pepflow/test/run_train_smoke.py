@@ -2,6 +2,7 @@
 """Run the one-step training smoke test and preserve reproducibility evidence."""
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -9,11 +10,17 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_ROOT = ROOT / "test" / "results" / "train-smoke"
+DEFAULT_DATA_FILES = (
+    "../datasets/PepMerge_lmdb.zip",
+    "../datasets/PepMerge_release.zip",
+    "../datasets/lmdb/pep_pocket_train_structure_cache.lmdb",
+)
 
 
 def git(*args, check=True):
@@ -40,6 +47,43 @@ def require_clean_commit():
             print(f"\n--- {title} ---", file=sys.stderr)
             print(diff, file=sys.stderr)
     raise SystemExit(2)
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def gpu_snapshot():
+    snapshot = {}
+    queries = {
+        "devices": [
+            "nvidia-smi",
+            "--query-gpu=index,uuid,memory.used,memory.total,utilization.gpu",
+            "--format=csv,noheader",
+        ],
+        "processes": [
+            "nvidia-smi",
+            "--query-compute-apps=gpu_uuid,pid,used_memory",
+            "--format=csv,noheader",
+        ],
+    }
+    for label, command in queries.items():
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        snapshot[label] = {
+            "exit_code": completed.returncode,
+            "output": completed.stdout.strip(),
+        }
+    return snapshot
 
 
 def parse_metrics(log_text):
@@ -84,10 +128,17 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--visible-gpus", default="0,1")
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--data-files", nargs="+", default=DEFAULT_DATA_FILES)
     args = parser.parse_args()
 
     require_clean_commit()
+    data_files = [(ROOT / value).resolve() for value in args.data_files]
+    for path in data_files:
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    input_hashes = {str(path): sha256(path) for path in data_files}
     started = datetime.now().astimezone()
+    started_monotonic = time.monotonic()
     stamp = started.strftime("%Y%m%d-%H%M%S%z")
     result_dir = RESULTS_ROOT / stamp
     result_dir.mkdir(parents=True, exist_ok=False)
@@ -110,6 +161,10 @@ def main():
         "visible_gpus": args.visible_gpus,
         "command": command,
         "python": sys.executable,
+        "input_sha256": input_hashes,
+        "gpu_before": gpu_snapshot(),
+        "gpu_after": None,
+        "elapsed_seconds": None,
     }
     (result_dir / "commit.txt").write_text(
         f"{commit}\n{commit_message.rstrip()}\n", encoding="utf-8"
@@ -138,7 +193,9 @@ def main():
         "finished_at": finished.isoformat(),
         "status": "passed" if exit_code == 0 else "failed",
         "exit_code": exit_code,
+        "elapsed_seconds": round(time.monotonic() - started_monotonic, 3),
         "metrics": metrics,
+        "gpu_after": gpu_snapshot(),
     })
     (result_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
