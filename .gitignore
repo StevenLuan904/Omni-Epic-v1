@@ -18,6 +18,7 @@ outputs/
 logs/
 wandb/
 **/test/results/
+.remote-gpu-managed
 *.ckpt
 *.pth
 *.pt
