@@ -19,6 +19,9 @@ logs/
 wandb/
 **/test/results/
 .remote-gpu-managed
+dynamicbind/.p.npy
+dynamicbind/.score.npy
+dynamicbind/.so3_*.npy
 *.ckpt
 *.pth
 *.pt
