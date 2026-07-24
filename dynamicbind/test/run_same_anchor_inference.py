@@ -18,6 +18,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_ROOT = (
     REPO_ROOT / "dynamicbind" / "test" / "results" / "day2-same-anchor-inference"
 )
+PEPTIDE_RESULTS_ROOT = (
+    REPO_ROOT / "dynamicbind" / "test" / "results" / "day3-peptide-inference"
+)
 
 
 def git(*args, check=True):
@@ -165,6 +168,11 @@ def main():
     parser.add_argument("--seeds", default="11,23,37,51")
     parser.add_argument("--inference-steps", type=int, default=20)
     parser.add_argument("--samples-per-complex", type=int, default=1)
+    parser.add_argument(
+        "--input-mode",
+        choices=("same-anchor", "independent"),
+        default="same-anchor",
+    )
     args = parser.parse_args()
 
     require_clean_commit()
@@ -185,14 +193,19 @@ def main():
         raise ValueError("--samples-per-complex must be positive")
 
     input_rows = read_rows(inputs_csv)
-    if len(input_rows) < 2:
+    if args.input_mode == "same-anchor" and len(input_rows) < 2:
         raise ValueError("same-anchor inference requires at least two conditions")
     protein_paths = {row["protein_path"] for row in input_rows}
-    if len(protein_paths) != 1:
+    if args.input_mode == "same-anchor" and len(protein_paths) != 1:
         raise ValueError(f"expected one receptor anchor, found {len(protein_paths)}")
 
     timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S%z")
-    result_dir = RESULTS_ROOT / timestamp
+    results_root = (
+        RESULTS_ROOT
+        if args.input_mode == "same-anchor"
+        else PEPTIDE_RESULTS_ROOT
+    )
+    result_dir = results_root / timestamp
     result_dir.mkdir(parents=True)
     commit = git("rev-parse", "HEAD")
     commit_message = git("log", "-1", "--format=%B")
@@ -209,6 +222,7 @@ def main():
         "seeds": seeds,
         "inference_steps": args.inference_steps,
         "samples_per_complex": args.samples_per_complex,
+        "input_mode": args.input_mode,
         "inputs": {
             "csv": str(inputs_csv),
             "csv_sha256": sha256(inputs_csv),
@@ -304,7 +318,7 @@ def main():
         metadata["gpu_after"] = gpu_snapshot()
         write_metadata(metadata_path, metadata)
 
-    print(f"Same-anchor inference {metadata['status']}: {result_dir}")
+    print(f"Inference {metadata['status']}: {result_dir}")
     if overall_exit:
         print(metadata["error"], file=sys.stderr)
     return overall_exit
