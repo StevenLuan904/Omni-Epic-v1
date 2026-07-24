@@ -173,9 +173,11 @@ strongly with peptide size and flexibility.
 
 The server already had PID 4077042 using all eight GPUs. The task explicitly
 authorized GPUs 0–1, and both retained sufficient memory headroom. PepFlow used
-physical GPU 0 and DynamicBind used physical GPU 1. Before/after snapshots show
-that each reproduction process exited and GPU memory returned to the prior
-baseline; the unrelated existing process was not modified.
+physical GPU 0 and DynamicBind used physical GPU 1. Post-run process audits
+show that each reproduction process exited and only the pre-existing PID
+remained. That unrelated process changed its own allocation during some short
+audit windows, so equality of aggregate before/after memory is not used as the
+exit criterion; the existing process was not modified.
 
 Decision:
 
