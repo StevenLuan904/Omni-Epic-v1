@@ -295,11 +295,14 @@ def main():
     checkpoint = model_dir / args.ckpt
     manifest_path = case_dir / "manifest.json"
     for path in (
-        case_dir, inputs_csv, esm_embeddings, inference_cache,
-        model_dir, checkpoint, manifest_path,
+        case_dir, inputs_csv, esm_embeddings, model_dir, checkpoint,
+        manifest_path,
     ):
         if not path.exists():
             raise FileNotFoundError(path)
+    materialized_cache = Path(f"{inference_cache}_torsion")
+    if not materialized_cache.is_dir():
+        raise FileNotFoundError(materialized_cache)
 
     timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S%z")
     result_dir = RESULTS_ROOT / timestamp
@@ -326,6 +329,7 @@ def main():
             "inputs_csv_sha256": sha256(inputs_csv),
             "esm_embeddings": str(esm_embeddings),
             "inference_cache": str(inference_cache),
+            "materialized_cache": str(materialized_cache),
             "model_dir": str(model_dir),
             "model_parameters_sha256": sha256(
                 model_dir / "model_parameters.yml"
