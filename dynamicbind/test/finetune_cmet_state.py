@@ -15,6 +15,10 @@ import shutil
 import subprocess
 import sys
 
+DYNAMICBIND_ROOT = Path(__file__).resolve().parents[1]
+if str(DYNAMICBIND_ROOT) not in sys.path:
+    sys.path.insert(0, str(DYNAMICBIND_ROOT))
+
 import numpy as np
 import pandas as pd
 import torch
