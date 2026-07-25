@@ -228,12 +228,11 @@ def state_errors(prediction, correct, wrong):
     return correct_error, wrong_error
 
 
-def trainable_parameters(model, last_layer):
-    prefixes = (
-        "cross_edge_embedding.",
-        f"lig_to_rec_conv_layers.{last_layer}.",
-        "res_tr_final_layer.",
-    )
+def trainable_parameters(model):
+    # The frozen backbone still produces ligand-conditioned receptor features.
+    # Updating only the receptor translation score head avoids retaining the
+    # six-layer equivariant backbone's activations on shared, busy GPUs.
+    prefixes = ("res_tr_final_layer.",)
     selected = {}
     for name, parameter in model.named_parameters():
         parameter.requires_grad = name.startswith(prefixes)
@@ -419,9 +418,7 @@ def main():
         state_dict = torch.load(checkpoint, map_location="cpu")
         model.load_state_dict(state_dict, strict=True)
         model = model.to(device)
-        selected = trainable_parameters(
-            model, int(model_args.num_conv_layers) - 1
-        )
+        selected = trainable_parameters(model)
         parameter_count = sum(p.numel() for p in model.parameters())
         trainable_count = sum(p.numel() for p in selected.values())
         initial_selected = {
@@ -429,6 +426,7 @@ def main():
             for name, parameter in selected.items()
         }
         metadata["parameters"] = {
+            "scope": "receptor_translation_score_head",
             "total": parameter_count,
             "trainable": trainable_count,
             "trainable_fraction": trainable_count / parameter_count,
