@@ -12,7 +12,7 @@ venv/
 *.local.yaml
 
 # Datasets, checkpoints, logs, and generated outputs
-datasets/
+/datasets/
 checkpoints/
 outputs/
 logs/
