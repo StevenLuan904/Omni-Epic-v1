@@ -248,20 +248,6 @@ def worker(args):
         rows = []
         with torch.no_grad():
             for index, batch in enumerate(peptide_batches):
-                captured = {}
-
-                def capture_prediction(module, inputs, output):
-                    captured["noisy_trans"] = inputs[2].detach()
-                    captured["pred_trans"] = output[1].detach()
-
-                handle = model.peptide_flow.ga_encoder.register_forward_hook(capture_prediction)
-                try:
-                    with torch.random.fork_rng(devices=[device]):
-                        torch.manual_seed(args.seed + 1000 + index)
-                        torch.cuda.manual_seed_all(args.seed + 1000 + index)
-                        losses = model.peptide_flow(batch)
-                finally:
-                    handle.remove()
                 target_trans = model.peptide_flow.encode(batch)[1]
                 mask = batch["generate_mask"].bool()
 
@@ -269,11 +255,34 @@ def worker(args):
                     squared = ((trans - target_trans) ** 2).sum(-1)
                     return float(torch.sqrt(squared[mask].mean()))
 
+                measurements = []
+                for draw in range(8):
+                    captured = {}
+
+                    def capture_prediction(module, inputs, output):
+                        captured["noisy_trans"] = inputs[2].detach()
+                        captured["pred_trans"] = output[1].detach()
+
+                    handle = model.peptide_flow.ga_encoder.register_forward_hook(capture_prediction)
+                    try:
+                        with torch.random.fork_rng(devices=[device]):
+                            fixed_seed = args.seed + 1000 + index * 100 + draw
+                            torch.manual_seed(fixed_seed)
+                            torch.cuda.manual_seed_all(fixed_seed)
+                            losses = model.peptide_flow(batch)
+                    finally:
+                        handle.remove()
+                    measurements.append({
+                        "noisy": ca_rmsd(captured["noisy_trans"]),
+                        "denoised": ca_rmsd(captured["pred_trans"]),
+                        "loss": float(sum_weighted_losses(losses, config.train.loss_weights)),
+                    })
                 rows.append({
                     "state": index,
-                    "noisy_ca_rmsd": ca_rmsd(captured["noisy_trans"]),
-                    "denoised_ca_rmsd": ca_rmsd(captured["pred_trans"]),
-                    "weighted_flow_loss": float(sum_weighted_losses(losses, config.train.loss_weights)),
+                    "draws": len(measurements),
+                    "noisy_ca_rmsd": sum(row["noisy"] for row in measurements) / len(measurements),
+                    "denoised_ca_rmsd": sum(row["denoised"] for row in measurements) / len(measurements),
+                    "weighted_flow_loss": sum(row["loss"] for row in measurements) / len(measurements),
                 })
         return rows
 
