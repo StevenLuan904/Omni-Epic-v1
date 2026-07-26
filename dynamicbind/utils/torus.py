@@ -72,11 +72,19 @@ def sample(sigma):
     return out
 
 
-score_norm_ = score(
-    sample(sigma[None].repeat(10000, 0).flatten()),
-    sigma[None].repeat(10000, 0).flatten()
-).reshape(10000, -1)
-score_norm_ = (score_norm_ ** 2).mean(0)
+score_norm_path = f'{package_folder_path}/.torus_score_norm.npy'
+if os.path.exists(score_norm_path):
+    score_norm_ = np.load(score_norm_path)
+else:
+    score_norm_ = score(
+        sample(sigma[None].repeat(10000, 0).flatten()),
+        sigma[None].repeat(10000, 0).flatten()
+    ).reshape(10000, -1)
+    score_norm_ = (score_norm_ ** 2).mean(0)
+    temporary_path = score_norm_path + '.tmp'
+    with open(temporary_path, 'wb') as handle:
+        np.save(handle, score_norm_)
+    os.replace(temporary_path, score_norm_path)
 
 
 def score_norm(sigma):

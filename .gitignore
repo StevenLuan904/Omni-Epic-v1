@@ -22,6 +22,7 @@ wandb/
 dynamicbind/.p.npy
 dynamicbind/.score.npy
 dynamicbind/.so3_*.npy
+dynamicbind/.torus_score_norm.npy
 *.ckpt
 *.pth
 *.pt
