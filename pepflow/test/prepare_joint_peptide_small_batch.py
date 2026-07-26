@@ -147,9 +147,21 @@ def prepare_case(archive, row, case_dir):
     ]
     esm_dir = case_dir / "esm2_output"
     esm_dir.mkdir()
-    zero_esm = torch.zeros((len(residues["a"]), 1280), dtype=torch.float32)
+    embedding_residues = {}
     for receptor_name in ("anchor_a.pdb", "anchor_b.pdb", "holo_a.pdb", "holo_b.pdb"):
-        torch.save({"representations": {33: zero_esm}}, esm_dir / f"{receptor_name}_chain_0.pt")
+        parsed = receptor_residues(atom_lines(files[receptor_name].encode("utf-8")))
+        chain_counts = {}
+        for residue in parsed:
+            chain = residue["key"][0]
+            chain_counts.setdefault(chain, 0)
+            chain_counts[chain] += all(atom in residue["atoms"] for atom in ("N", "CA", "C"))
+        embedding_residues[receptor_name] = list(chain_counts.values())
+        for chain_index, count in enumerate(chain_counts.values()):
+            zero_esm = torch.zeros((count, 1280), dtype=torch.float32)
+            torch.save(
+                {"representations": {33: zero_esm}},
+                esm_dir / f"{receptor_name}_chain_{chain_index}.pt",
+            )
     for label in ("a", "b"):
         state_dir = case_dir / f"pepflow_{label}"
         state_dir.mkdir()
@@ -163,6 +175,7 @@ def prepare_case(archive, row, case_dir):
         "receptor_sequence_sha256": hashlib.sha256(data["a"]["receptor_fasta"].encode()).hexdigest(),
         "receptor_residues": len(residues["a"]),
         "receptor_alignment_ca_rmsd": receptor_rmsd,
+        "embedding_residues": embedding_residues,
         "pocket_ca_rmsd": float(row["pocket_ca_rmsd"]),
         "peptide_atoms": peptide_atoms,
         "anchor_type": "cross_holo",
