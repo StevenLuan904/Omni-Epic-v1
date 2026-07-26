@@ -332,7 +332,6 @@ def worker(args):
             data = load_case(case_id)
             batches = [peptide_batch(item) for item in data["peptide_items"]]
             targets = [target_on_device(target) for target in data["targets"]]
-            per_state = []
             for index in range(2):
                 peptide_losses, output = model(
                     batches[index], graph_batch(data["graphs"][index], args.peptide_noise)
@@ -346,17 +345,16 @@ def worker(args):
                     args.peptide_weight * peptide_value + correct
                     + args.ranking_weight * ranking + args.relaxation_weight * relaxation
                 )
-                per_state.append(total)
+                (total / (2 * len(case_batch))).backward()
                 for name, value in (
+                    ("loss", total),
                     ("peptide_loss", peptide_value), ("endpoint_loss", correct),
                     ("ranking_loss", ranking), ("relaxation_loss", relaxation),
                     ("translation_loss", tr_loss), ("rotation_loss", rot_loss), ("chi_loss", chi_loss),
                 ):
                     accumulators[name].append(value.detach())
-            case_loss = torch.stack(per_state).mean()
-            (case_loss / len(case_batch)).backward()
-            accumulators["loss"].append(case_loss.detach())
-            del batches, targets, per_state
+            del batches, targets
+            torch.cuda.empty_cache()
         gradient_norm = torch.nn.utils.clip_grad_norm_(selected.values(), args.max_grad_norm)
         optimizer.step()
         row = {"step": step, "cases": ";".join(case_batch), "gradient_norm": float(gradient_norm)}
