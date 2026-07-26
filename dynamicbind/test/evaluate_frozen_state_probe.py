@@ -185,7 +185,7 @@ def permutation_null(train_delta, test_delta, observed, repetitions=99):
     for index in range(repetitions):
         generator = np.random.RandomState(91000 + index)
         signs = generator.choice([-1.0, 1.0], size=(len(train_delta), 1))
-        head, scale, _ = fit_head(train_delta * signs, 80000 + index, steps=150)
+        head, scale, _ = fit_head(train_delta * signs, HEAD_SEEDS[0])
         accuracies.append(evaluate_head(head, scale, test_delta)["pair_accuracy"])
     return {
         "repetitions": repetitions,
@@ -305,7 +305,9 @@ def evaluate_system(system, feature_path):
     descriptor_test = np.repeat(descriptor_delta[None, :], 6, axis=0)
     baseline_head, baseline_scale, _ = fit_head(descriptor_train, HEAD_SEEDS[0])
     ligand_only = evaluate_head(baseline_head, baseline_scale, descriptor_test)
-    observed_for_null = float(np.mean(test_accuracy))
+    # The first predeclared head is the primary statistic. The other two heads
+    # are sensitivity runs and are not treated as independent test samples.
+    observed_for_null = runs[0]["test"]["pair_accuracy"]
     representative_correct = runs[0]["test"]["pair_correct"]
     representative_total = runs[0]["test"]["pair_total"]
     return {
@@ -318,6 +320,8 @@ def evaluate_system(system, feature_path):
         "split_seed_groups": {key: value.tolist() for key, value in groups.items()},
         "runs": runs,
         "summary": {
+            "primary_head_seed": HEAD_SEEDS[0],
+            "primary_test_accuracy": observed_for_null,
             "mean_test_accuracy": float(np.mean(test_accuracy)),
             "minimum_test_accuracy": float(np.min(test_accuracy)),
             "mean_test_auc": float(np.mean(test_auc)),
@@ -325,7 +329,7 @@ def evaluate_system(system, feature_path):
             "maximum_dummy_absolute_logit": float(np.max(dummy_logit)),
             "fixed_pair_readout_gate": bool(fixed_pair_gate),
             "ligand_only_accuracy": ligand_only["accuracy"],
-            "test_pair_wilson_95_interval": wilson_interval(
+            "primary_test_pair_wilson_95_interval": wilson_interval(
                 representative_correct, representative_total
             ),
             "state_compatibility_identifiable": False,
@@ -394,6 +398,7 @@ def main():
         "torch_version": torch.__version__,
         "protocol": {
             "head": "single linear layer", "head_seeds": HEAD_SEEDS,
+            "primary_head_seed": HEAD_SEEDS[0],
             "split": "12 train / 6 validation / 6 final test placement seeds",
             "fixed_pair_gate": "mean accuracy/AUC >=0.80; min accuracy and swap >=0.75; dummy |logit| <=0.405",
             "scientific_limit": "one ligand per state cannot identify compatibility apart from ligand identity",
