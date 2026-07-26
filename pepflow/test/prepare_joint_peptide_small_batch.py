@@ -12,6 +12,7 @@ import shutil
 import sys
 import zipfile
 
+from Bio.PDB import PDBParser
 import numpy as np
 import torch
 
@@ -149,14 +150,13 @@ def prepare_case(archive, row, case_dir):
     esm_dir.mkdir()
     embedding_residues = {}
     for receptor_name in ("anchor_a.pdb", "anchor_b.pdb", "holo_a.pdb", "holo_b.pdb"):
-        parsed = receptor_residues(atom_lines(files[receptor_name].encode("utf-8")))
-        chain_counts = {}
-        for residue in parsed:
-            chain = residue["key"][0]
-            chain_counts.setdefault(chain, 0)
-            chain_counts[chain] += all(atom in residue["atoms"] for atom in ("N", "CA", "C"))
-        embedding_residues[receptor_name] = list(chain_counts.values())
-        for chain_index, count in enumerate(chain_counts.values()):
+        structure = PDBParser(QUIET=True).get_structure(receptor_name, case_dir / receptor_name)
+        chain_counts = [
+            sum(all(atom in residue for atom in ("N", "CA", "C")) for residue in chain)
+            for chain in structure[0]
+        ]
+        embedding_residues[receptor_name] = chain_counts
+        for chain_index, count in enumerate(chain_counts):
             zero_esm = torch.zeros((count, 1280), dtype=torch.float32)
             torch.save(
                 {"representations": {33: zero_esm}},
