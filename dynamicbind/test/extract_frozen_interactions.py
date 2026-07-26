@@ -201,6 +201,36 @@ def build_dataset(frame, cache_path, esm_embeddings, model_args, seed):
     )
 
 
+def build_dummy_graphs(anchor, cache_path, esm_embeddings, model_args, seed):
+    dummy_path = cache_path.parent / "dummy_methane.sdf"
+    molecule = Chem.AddHs(Chem.MolFromSmiles("C"))
+    parameters = AllChem.ETKDGv2()
+    parameters.randomSeed = int(seed % (2**31 - 1))
+    if AllChem.EmbedMolecule(molecule, parameters) != 0:
+        raise RuntimeError("seeded ETKDG failed for dummy methane")
+    writer = Chem.SDWriter(str(dummy_path))
+    writer.write(molecule)
+    writer.close()
+    dataset = PDBBind(
+        transform=None, root="", name_list=["dummy_A", "dummy_B"],
+        protein_path_list=[anchor, anchor],
+        ligand_descriptions=[str(dummy_path), str(dummy_path)],
+        receptor_radius=model_args.receptor_radius,
+        cache_path=str(cache_path), remove_hs=model_args.remove_hs,
+        max_lig_size=None,
+        c_alpha_max_neighbors=model_args.c_alpha_max_neighbors,
+        matching=False, keep_original=False,
+        popsize=model_args.matching_popsize,
+        maxiter=model_args.matching_maxiter, center_ligand=True,
+        all_atoms=False, atom_radius=model_args.atom_radius,
+        atom_max_neighbors=model_args.atom_max_neighbors,
+        esm_embeddings_path=str(esm_embeddings), require_ligand=True,
+        require_receptor=False, num_workers=1, keep_local_structures=True,
+        use_existing_cache=False,
+    )
+    return [dataset.get(0), dataset.get(1)], dummy_path
+
+
 def positioned_graph(graph, placement_seed, time_value, device):
     graph = copy.deepcopy(graph)
     generator = np.random.RandomState(placement_seed)
@@ -402,18 +432,46 @@ def main():
                 "rebuilt_ligand_sha256": sha256(rebuilt_path),
                 "canonical_isomeric_smiles": smiles_value,
             })
+        swap_features = []
+        for graph in reversed(graphs):
+            for sample_index in range(args.samples_per_condition):
+                swap_features.append(pooled_last_cross_feature(
+                    model, positioned_graph(
+                        graph, args.seed + sample_index, args.time, device
+                    )
+                ))
+        dummy_graphs, dummy_path = build_dummy_graphs(
+            anchor, result_dir / "dummy_cache", esm_embeddings,
+            model_args, args.seed
+        )
+        dummy_features = []
+        for graph in dummy_graphs:
+            for sample_index in range(args.samples_per_condition):
+                dummy_features.append(pooled_last_cross_feature(
+                    model, positioned_graph(
+                        graph, args.seed + sample_index, args.time, device
+                    )
+                ))
         after_hash = model_parameter_sha256(model)
         if before_hash != after_hash:
             raise RuntimeError("frozen model parameter hash changed")
         feature_matrix = np.asarray(features)
-        if not np.isfinite(feature_matrix).all():
-            raise RuntimeError("feature matrix contains NaN or Inf")
+        swap_matrix = np.asarray(swap_features)
+        dummy_matrix = np.asarray(dummy_features)
+        for label, matrix in (
+            ("features", feature_matrix), ("swap", swap_matrix),
+            ("dummy", dummy_matrix),
+        ):
+            if matrix.shape != feature_matrix.shape or not np.isfinite(matrix).all():
+                raise RuntimeError(f"invalid {label} feature matrix {matrix.shape}")
 
         feature_path = result_dir / "features.npz"
         np.savez_compressed(
             feature_path, features=feature_matrix, labels=np.asarray(labels),
             placement_seeds=np.asarray(placement_seeds),
             conditions=np.asarray([item["condition"] for item in conditions]),
+            input_swap_features=swap_matrix,
+            dummy_ligand_features=dummy_matrix,
         )
         metadata.update({
             "status": "passed", "anchor": anchor,
@@ -435,6 +493,25 @@ def main():
                     feature_matrix[:args.samples_per_condition] -
                     feature_matrix[args.samples_per_condition:], axis=1
                 ).mean()),
+            },
+            "controls": {
+                "input_row_swap": {
+                    "definition": "independent forwards with A/B graph rows exchanged",
+                    "max_abs_reexecution_error": float(np.max(np.abs(
+                        swap_matrix - np.concatenate([
+                            feature_matrix[args.samples_per_condition:],
+                            feature_matrix[:args.samples_per_condition],
+                        ], axis=0)
+                    ))),
+                },
+                "dummy_null_ligand": {
+                    "definition": "same seeded methane graph replaces both ligands",
+                    "path": str(dummy_path), "sha256": sha256(dummy_path),
+                    "paired_l2_mean": float(np.linalg.norm(
+                        dummy_matrix[:args.samples_per_condition] -
+                        dummy_matrix[args.samples_per_condition:], axis=1
+                    ).mean()),
+                },
             },
             "outputs": {
                 "features": str(feature_path),
