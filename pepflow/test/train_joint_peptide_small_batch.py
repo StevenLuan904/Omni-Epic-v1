@@ -63,12 +63,11 @@ def worker(args):
     if "train" not in split:
         raise ValueError(f"split {args.split} is not executable")
     case_records = {record["case_id"]: record for record in manifest["cases"]}
-    train_ids = split["train"][:args.max_train_cases or None]
-    evaluation_ids = {}
+    train_candidates = split["train"]
+    evaluation_candidates = {}
     for split_name in ("random_complex", "peptide_cluster", "receptor_family_proxy"):
-        values = manifest["splits"][split_name]["test"]
-        evaluation_ids[split_name] = values[:args.max_eval_cases or None]
-    if len(train_ids) < 2 or any(not values for values in evaluation_ids.values()):
+        evaluation_candidates[split_name] = manifest["splits"][split_name]["test"]
+    if len(train_candidates) < 2 or any(not values for values in evaluation_candidates.values()):
         raise RuntimeError("small-batch split has insufficient train/evaluation cases")
 
     model_dir = Path(args.model_dir).resolve()
@@ -177,17 +176,25 @@ def worker(args):
         loaded_cases[case_id] = {"peptide_items": peptide_items, "graphs": graphs, "targets": targets}
         return loaded_cases[case_id]
 
-    required_ids = sorted(set(train_ids).union(*evaluation_ids.values()))
-    for case_id in required_ids:
-        try:
-            load_case(case_id)
-        except Exception as error:
-            preprocessing_failures[case_id] = repr(error)
-            print(json.dumps({"preprocessing_failure": case_id, "error": repr(error)}), flush=True)
-    train_ids = [case_id for case_id in train_ids if case_id not in preprocessing_failures]
+    def select_valid(candidates, limit):
+        selected_ids = []
+        target_count = limit or len(candidates)
+        for case_id in candidates:
+            try:
+                load_case(case_id)
+            except Exception as error:
+                preprocessing_failures[case_id] = repr(error)
+                print(json.dumps({"preprocessing_failure": case_id, "error": repr(error)}), flush=True)
+                continue
+            selected_ids.append(case_id)
+            if len(selected_ids) == target_count:
+                break
+        return selected_ids
+
+    train_ids = select_valid(train_candidates, args.max_train_cases)
     evaluation_ids = {
-        name: [case_id for case_id in values if case_id not in preprocessing_failures]
-        for name, values in evaluation_ids.items()
+        name: select_valid(values, args.max_eval_cases)
+        for name, values in evaluation_candidates.items()
     }
     if len(train_ids) < args.minimum_train_cases or any(not values for values in evaluation_ids.values()):
         raise RuntimeError(f"too many preprocessing failures: {preprocessing_failures}")
