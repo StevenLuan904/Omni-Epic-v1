@@ -199,7 +199,10 @@ def main():
     esm_dir.mkdir()
     zero_esm = torch.zeros((len(res_a), 1280), dtype=torch.float32)
     for receptor_name in ("common_anchor.pdb", "holo_a.pdb", "holo_b.pdb"):
-        torch.save(zero_esm, esm_dir / f"{receptor_name}_chain_0.pt")
+        torch.save(
+            {"representations": {33: zero_esm}},
+            esm_dir / f"{receptor_name}_chain_0.pt",
+        )
     with (result_dir / "inference_inputs.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["protein_path", "ligand", "complex_name"])
         writer.writeheader()
