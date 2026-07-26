@@ -76,11 +76,12 @@ score_norm_path = f'{package_folder_path}/.torus_score_norm.npy'
 if os.path.exists(score_norm_path):
     score_norm_ = np.load(score_norm_path)
 else:
-    score_norm_ = score(
-        sample(sigma[None].repeat(10000, 0).flatten()),
-        sigma[None].repeat(10000, 0).flatten()
-    ).reshape(10000, -1)
-    score_norm_ = (score_norm_ ** 2).mean(0)
+    score_norm_ = np.empty_like(sigma)
+    for start in range(0, len(sigma), 256):
+        stop = min(start + 256, len(sigma))
+        sigma_chunk = np.broadcast_to(sigma[start:stop], (10000, stop - start))
+        sampled_scores = score(sample(sigma_chunk), sigma_chunk)
+        score_norm_[start:stop] = (sampled_scores ** 2).mean(0)
     temporary_path = score_norm_path + '.tmp'
     with open(temporary_path, 'wb') as handle:
         np.save(handle, score_norm_)
