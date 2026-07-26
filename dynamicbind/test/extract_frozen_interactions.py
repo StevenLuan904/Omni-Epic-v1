@@ -8,11 +8,13 @@ import json
 import os
 from datetime import datetime
 from functools import partial
+from glob import glob
 from pathlib import Path
 import random
 import shlex
 import subprocess
 import sys
+import time
 import traceback
 
 DYNAMICBIND_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +27,7 @@ import torch
 import yaml
 from argparse import Namespace
 from rdkit import Chem
+from rdkit.Chem import AllChem
 from scipy.spatial.transform import Rotation
 from torch_geometric.data import Batch
 
@@ -136,20 +139,43 @@ def canonical_smiles(path):
     return Chem.MolToSmiles(Chem.RemoveHs(molecule), isomericSmiles=True)
 
 
-def build_dataset(frame, cache_path, esm_embeddings, model_args):
+def rebuild_ligand(source_path, destination, seed):
+    smiles = canonical_smiles(source_path)
+    molecule = Chem.AddHs(Chem.MolFromSmiles(smiles))
+    parameters = AllChem.ETKDGv2()
+    parameters.randomSeed = int(seed % (2**31 - 1))
+    if AllChem.EmbedMolecule(molecule, parameters) != 0:
+        raise RuntimeError(f"seeded ETKDG failed for {source_path}")
+    AllChem.MMFFOptimizeMolecule(
+        molecule, mmffVariant="MMFF94s", maxIters=500
+    )
+    writer = Chem.SDWriter(str(destination))
+    writer.write(molecule)
+    writer.close()
+    return smiles
+
+
+def build_dataset(frame, cache_path, esm_embeddings, model_args, seed):
     protein_paths = [str(Path(path).resolve()) for path in frame["protein_path"]]
     ligand_paths = [Path(path).resolve() for path in frame["ligand"]]
     for path in [*map(Path, protein_paths), *ligand_paths]:
         if not path.is_file():
             raise FileNotFoundError(path)
-    smiles = [canonical_smiles(path) for path in ligand_paths]
     if len(set(protein_paths)) != 1:
         raise ValueError("both ligand conditions must use one receptor anchor")
-    if len(smiles) != 2:
+    if len(ligand_paths) != 2:
         raise ValueError("exactly two ligand conditions are required")
+    rebuilt_dir = cache_path.parent / "rebuilt_ligands"
+    rebuilt_dir.mkdir(parents=True)
+    rebuilt_paths = [rebuilt_dir / f"state_{label}.sdf" for label in range(2)]
+    smiles = [
+        rebuild_ligand(source, rebuilt, seed + label)
+        for label, (source, rebuilt) in enumerate(zip(ligand_paths, rebuilt_paths))
+    ]
     dataset = PDBBind(
         transform=None, root="", name_list=["state_A", "state_B"],
-        protein_path_list=protein_paths, ligand_descriptions=smiles,
+        protein_path_list=protein_paths,
+        ligand_descriptions=[str(path) for path in rebuilt_paths],
         receptor_radius=model_args.receptor_radius,
         cache_path=str(cache_path), remove_hs=model_args.remove_hs,
         max_lig_size=None,
@@ -164,12 +190,15 @@ def build_dataset(frame, cache_path, esm_embeddings, model_args):
             if model_args.esm_embeddings_path is not None else None
         ),
         require_ligand=True, require_receptor=False, num_workers=1,
-        keep_local_structures=False, use_existing_cache=False,
+        keep_local_structures=True, use_existing_cache=False,
     )
     graphs = [dataset.get(index) for index in range(len(dataset))]
     if len(graphs) != 2:
         raise ValueError(f"expected two graphs, found {len(graphs)}")
-    return graphs, protein_paths[0], ligand_paths, smiles, dataset.full_cache_path
+    return (
+        graphs, protein_paths[0], ligand_paths, rebuilt_paths, smiles,
+        dataset.full_cache_path,
+    )
 
 
 def positioned_graph(graph, placement_seed, time_value, device):
@@ -204,9 +233,15 @@ def pooled_last_cross_feature(model, graph):
     if len(captured) != 1:
         raise RuntimeError(f"expected one final cross update, captured {len(captured)}")
     scalar = captured[0][:, :model.ns]
-    return torch.cat(
+    feature = torch.cat(
         [scalar.mean(0), scalar.std(0, unbiased=False), scalar.amax(0)], dim=0
     ).cpu().numpy().astype(np.float32)
+    if feature.shape != (3 * model.ns,) or not np.isfinite(feature).all():
+        raise RuntimeError(
+            f"invalid cross feature shape/values: {feature.shape}, "
+            f"finite={bool(np.isfinite(feature).all())}"
+        )
+    return feature
 
 
 def write_report(path, metadata):
@@ -253,6 +288,7 @@ def main():
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for feature extraction")
     seed_everything(args.seed)
+    started_monotonic = time.monotonic()
 
     timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S%z")
     result_dir = RESULTS_ROOT / f"{timestamp}-{args.system}"
@@ -284,6 +320,7 @@ def main():
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "device": str(torch.cuda.get_device_name(0)),
+        "logical_cuda_device": 0,
         "samples_per_condition": args.samples_per_condition,
         "time": args.time, "seed": args.seed,
         "inputs": {
@@ -318,14 +355,20 @@ def main():
         required = {"protein_path", "ligand"}
         if not required.issubset(frame.columns):
             raise ValueError(f"input CSV requires columns {sorted(required)}")
-        frame = frame.iloc[:2].copy()
-        if len(frame) != 2:
-            raise ValueError("input CSV must contain at least two state rows")
+        if "condition" in frame:
+            frame = frame[frame["condition"] != "shuffled_control"]
+        if len(frame) != 2 or frame.get("condition", pd.Series()).nunique() != 2:
+            raise ValueError("input CSV must contain exactly two unique state rows")
+        frame = frame.copy()
         with (model_dir / "model_parameters.yml").open() as handle:
             model_args = Namespace(**yaml.full_load(handle))
+        if model_args.all_atoms:
+            raise ValueError("this probe supports the coarse-grained v1 model only")
         cache_path = result_dir / "cache"
-        graphs, anchor, ligand_paths, smiles, full_cache = build_dataset(
-            frame, cache_path, esm_embeddings, model_args
+        (
+            graphs, anchor, ligand_paths, rebuilt_paths, smiles, full_cache,
+        ) = build_dataset(
+            frame, cache_path, esm_embeddings, model_args, args.seed
         )
         device = torch.device("cuda:0")
         sigma = partial(t_to_sigma_compl, args=model_args)
@@ -339,8 +382,8 @@ def main():
 
         features, labels, placement_seeds = [], [], []
         conditions = []
-        for label, (graph, ligand_path, smiles_value) in enumerate(
-            zip(graphs, ligand_paths, smiles)
+        for label, (graph, ligand_path, rebuilt_path, smiles_value) in enumerate(
+            zip(graphs, ligand_paths, rebuilt_paths, smiles)
         ):
             for sample_index in range(args.samples_per_condition):
                 placement_seed = args.seed + sample_index
@@ -355,25 +398,44 @@ def main():
                 "label": label, "samples": args.samples_per_condition,
                 "ligand_path": str(ligand_path),
                 "ligand_sha256": sha256(ligand_path),
+                "rebuilt_ligand_path": str(rebuilt_path),
+                "rebuilt_ligand_sha256": sha256(rebuilt_path),
                 "canonical_isomeric_smiles": smiles_value,
             })
         after_hash = model_parameter_sha256(model)
         if before_hash != after_hash:
             raise RuntimeError("frozen model parameter hash changed")
+        feature_matrix = np.asarray(features)
+        if not np.isfinite(feature_matrix).all():
+            raise RuntimeError("feature matrix contains NaN or Inf")
 
         feature_path = result_dir / "features.npz"
         np.savez_compressed(
-            feature_path, features=np.asarray(features), labels=np.asarray(labels),
+            feature_path, features=feature_matrix, labels=np.asarray(labels),
             placement_seeds=np.asarray(placement_seeds),
             conditions=np.asarray([item["condition"] for item in conditions]),
         )
         metadata.update({
             "status": "passed", "anchor": anchor,
+            "anchor_sha256": sha256(anchor),
+            "esm_embedding_files": [{
+                "path": path,
+                "sha256": sha256(path),
+            } for path in sorted(glob(
+                str(esm_embeddings / f"{Path(anchor).name}*")
+            ))],
             "conditions": conditions,
             "materialized_cache": str(full_cache),
             "model_parameter_hash_before": before_hash,
             "model_parameter_hash_after": after_hash,
-            "feature_shape": list(np.asarray(features).shape),
+            "feature_shape": list(feature_matrix.shape),
+            "feature_summary": {
+                "variance": float(feature_matrix.var()),
+                "paired_l2_mean": float(np.linalg.norm(
+                    feature_matrix[:args.samples_per_condition] -
+                    feature_matrix[args.samples_per_condition:], axis=1
+                ).mean()),
+            },
             "outputs": {
                 "features": str(feature_path),
                 "features_sha256": sha256(feature_path),
@@ -387,6 +449,7 @@ def main():
         metadata["traceback"] = traceback.format_exc()
     finally:
         metadata["finished_at"] = datetime.now().astimezone().isoformat()
+        metadata["elapsed_seconds"] = time.monotonic() - started_monotonic
         metadata["exit_code"] = exit_code
         metadata["gpu_after"] = gpu_snapshot()
         write_report(result_dir / "report.html", metadata)
