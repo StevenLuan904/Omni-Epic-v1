@@ -112,10 +112,12 @@ def worker(args):
     config, _ = load_config(args.pepflow_config)
     peptide_flow = FlowModel(config.model)
     pepflow_initialization = "random"
+    pepflow_checkpoint_sha256 = None
     if args.pepflow_checkpoint:
         pep_checkpoint = torch.load(args.pepflow_checkpoint, map_location="cpu")
         peptide_flow.load_state_dict(process_dic(pep_checkpoint.get("model", pep_checkpoint)), strict=True)
         pepflow_initialization = "checkpoint"
+        pepflow_checkpoint_sha256 = sha256(args.pepflow_checkpoint)
     sigma = partial(t_to_sigma_compl, args=model_args)
     receptor_flow = get_model(model_args, device, t_to_sigma=sigma, no_parallel=True)
     receptor_flow.load_state_dict(torch.load(checkpoint, map_location="cpu"), strict=True)
@@ -345,6 +347,7 @@ def worker(args):
         writer.writeheader(); writer.writerows(rows)
     torch.save({
         "base_dynamicbind_sha256": sha256(checkpoint),
+        "base_pepflow_sha256": pepflow_checkpoint_sha256,
         "pepflow_initialization": pepflow_initialization,
         "trainable_state_dict": {name: parameter.detach().cpu() for name, parameter in selected.items()},
     }, result_dir / "trainable_delta.pt")
@@ -352,6 +355,7 @@ def worker(args):
     initial_loss, final_loss = rows[0]["loss"], rows[-1]["loss"]
     summary = {
         "pepflow_initialization": pepflow_initialization,
+        "pepflow_checkpoint_sha256": pepflow_checkpoint_sha256,
         "parameters": {
             "total": sum(p.numel() for p in model.parameters()),
             "trainable": sum(p.numel() for p in selected.values()),
