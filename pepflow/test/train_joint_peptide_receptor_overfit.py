@@ -243,7 +243,42 @@ def worker(args):
                 })
         return rows
 
+    def evaluate_peptide_denoising():
+        model.peptide_flow.eval()
+        rows = []
+        with torch.no_grad():
+            for index, batch in enumerate(peptide_batches):
+                captured = {}
+
+                def capture_prediction(module, inputs, output):
+                    captured["noisy_trans"] = inputs[2].detach()
+                    captured["pred_trans"] = output[1].detach()
+
+                handle = model.peptide_flow.ga_encoder.register_forward_hook(capture_prediction)
+                try:
+                    with torch.random.fork_rng(devices=[device]):
+                        torch.manual_seed(args.seed + 1000 + index)
+                        torch.cuda.manual_seed_all(args.seed + 1000 + index)
+                        losses = model.peptide_flow(batch)
+                finally:
+                    handle.remove()
+                target_trans = model.peptide_flow.encode(batch)[1]
+                mask = batch["generate_mask"].bool()
+
+                def ca_rmsd(trans):
+                    squared = ((trans - target_trans) ** 2).sum(-1)
+                    return float(torch.sqrt(squared[mask].mean()))
+
+                rows.append({
+                    "state": index,
+                    "noisy_ca_rmsd": ca_rmsd(captured["noisy_trans"]),
+                    "denoised_ca_rmsd": ca_rmsd(captured["pred_trans"]),
+                    "weighted_flow_loss": float(sum_weighted_losses(losses, config.train.loss_weights)),
+                })
+        return rows
+
     before = {name: evaluate(name) for name in ("normal", "shuffle", "zero")}
+    peptide_denoising_before = evaluate_peptide_denoising()
     optimizer = torch.optim.AdamW(selected.values(), lr=args.learning_rate, weight_decay=1e-4)
     rows = []
     model.eval()
@@ -280,6 +315,7 @@ def worker(args):
         print(json.dumps(row), flush=True)
 
     after = {name: evaluate(name) for name in ("normal", "shuffle", "zero")}
+    peptide_denoising_after = evaluate_peptide_denoising()
     peptide_samples = []
     model.peptide_flow.eval()
     with torch.no_grad():
@@ -312,11 +348,20 @@ def worker(args):
             "trainable": sum(p.numel() for p in selected.values()),
             "names": list(selected),
         },
-        "before": before, "after": after, "peptide_samples": peptide_samples,
+        "before": before, "after": after,
+        "peptide_denoising_before": peptide_denoising_before,
+        "peptide_denoising_after": peptide_denoising_after,
+        "peptide_samples": peptide_samples,
         "initial_loss": initial_loss, "final_loss": final_loss,
         "loss_reduction_fraction": (initial_loss - final_loss) / max(abs(initial_loss), 1e-8),
         "joint_overfit_gate": bool(
-            final_loss < initial_loss and all(row["selected_correct"] for row in normal_after)
+            final_loss < initial_loss
+            and all(row["selected_correct"] for row in normal_after)
+            and all(
+                after_row["denoised_ca_rmsd"] < before_row["denoised_ca_rmsd"]
+                and after_row["denoised_ca_rmsd"] < after_row["noisy_ca_rmsd"]
+                for before_row, after_row in zip(peptide_denoising_before, peptide_denoising_after)
+            )
         ),
     }
     (result_dir / "worker_summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
