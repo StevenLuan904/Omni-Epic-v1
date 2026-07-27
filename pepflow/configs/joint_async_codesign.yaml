@@ -1,8 +1,58 @@
 schema_version: 1
 
 experiment:
-  active_stage: async_overfit  # async_overfit | codesign_overfit | codesign_sample
+  active_stage: codesign_overfit  # async_overfit | codesign_overfit | codesign_sample
   seed: 20260727
+  active_run: smoke_1case
+  runs:
+    smoke_1case:
+      split: random_complex
+      steps: 1
+      cases_per_step: 1
+      max_train_cases: 1
+      max_eval_cases: 1
+      minimum_train_cases: 1
+      sequence_mask_probability: 0.30
+      learning_rate: 0.0001
+      weight_decay: 0.0001
+      peptide_noise: 0.5
+      max_grad_norm: 10.0
+    overfit_mask15:
+      split: random_complex
+      steps: 100
+      cases_per_step: 2
+      max_train_cases: 4
+      max_eval_cases: 1
+      minimum_train_cases: 4
+      sequence_mask_probability: 0.15
+      learning_rate: 0.0001
+      weight_decay: 0.0001
+      peptide_noise: 0.5
+      max_grad_norm: 10.0
+    overfit_mask30:
+      split: random_complex
+      steps: 100
+      cases_per_step: 2
+      max_train_cases: 4
+      max_eval_cases: 1
+      minimum_train_cases: 4
+      sequence_mask_probability: 0.30
+      learning_rate: 0.0001
+      weight_decay: 0.0001
+      peptide_noise: 0.5
+      max_grad_norm: 10.0
+    overfit_mask50:
+      split: random_complex
+      steps: 100
+      cases_per_step: 2
+      max_train_cases: 4
+      max_eval_cases: 1
+      minimum_train_cases: 4
+      sequence_mask_probability: 0.50
+      learning_rate: 0.0001
+      weight_decay: 0.0001
+      peptide_noise: 0.5
+      max_grad_norm: 10.0
 
 clocks:
   registry:
@@ -68,7 +118,7 @@ model:
   codesign_parameter_budget_max: 22000000
   detach_adapter: false
   sequence:
-    enabled: false
+    enabled: true
     masking_probabilities: [0.15, 0.30, 0.50]
     categorical_flow: true
 

@@ -4,6 +4,7 @@
 import argparse
 import csv
 from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,36 @@ from train_joint_peptide_receptor_overfit import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_ROOT = REPO_ROOT / "pepflow" / "test" / "results" / "joint-small-batch-train"
+
+
+def apply_experiment_config(args):
+    if not args.experiment_config:
+        return
+    import yaml
+
+    config_path = Path(args.experiment_config)
+    if not config_path.is_absolute():
+        config_path = REPO_ROOT / config_path
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    run_name = args.run_name or config["experiment"]["active_run"]
+    try:
+        run = config["experiment"]["runs"][run_name]
+    except KeyError as error:
+        raise ValueError(f"unknown YAML run profile: {run_name}") from error
+    for name, value in run.items():
+        if not hasattr(args, name):
+            raise ValueError(f"unsupported run setting: {name}")
+        setattr(args, name, value)
+    loss = config["loss"]
+    args.peptide_weight = loss["peptide_flow"]
+    args.rotation_weight = loss["receptor_rotation"]
+    args.chi_weight = loss["receptor_chi"]
+    args.ranking_weight = loss["endpoint_ranking"]
+    args.ranking_margin = loss["ranking_margin"]
+    args.relaxation_weight = loss["minimal_relaxation"]
+    args.seed = config["experiment"]["seed"]
+    args.run_name = run_name
+    args.experiment_config = str(config_path.resolve())
 
 
 def worker(args):
@@ -67,7 +98,7 @@ def worker(args):
     evaluation_candidates = {}
     for split_name in ("random_complex", "peptide_cluster", "receptor_family_proxy"):
         evaluation_candidates[split_name] = manifest["splits"][split_name]["test"]
-    if len(train_candidates) < 2 or any(not values for values in evaluation_candidates.values()):
+    if len(train_candidates) < 1 or any(not values for values in evaluation_candidates.values()):
         raise RuntimeError("small-batch split has insufficient train/evaluation cases")
 
     model_dir = Path(args.model_dir).resolve()
@@ -75,6 +106,9 @@ def worker(args):
     with (model_dir / "model_parameters.yml").open() as handle:
         model_args = Namespace(**yaml.full_load(handle))
     config, _ = load_config(args.pepflow_config)
+    experiment_config = yaml.safe_load(
+        Path(args.experiment_config).read_text(encoding="utf-8")
+    )
     peptide_flow = FlowModel(config.model)
     pep_checkpoint = torch.load(args.pepflow_checkpoint, map_location="cpu")
     peptide_flow.load_state_dict(process_dic(pep_checkpoint.get("model", pep_checkpoint)), strict=True)
@@ -82,7 +116,11 @@ def worker(args):
     receptor_flow = get_model(model_args, device, t_to_sigma=sigma, no_parallel=True)
     receptor_flow.load_state_dict(torch.load(checkpoint, map_location="cpu"), strict=True)
     model = JointPeptideReceptorFlow(
-        peptide_flow, receptor_flow, config.model.encoder.node_embed_size, model_args.ns
+        peptide_flow,
+        receptor_flow,
+        config.model.encoder.node_embed_size,
+        model_args.ns,
+        clock_embedding=experiment_config["clocks"]["embedding"],
     ).to(device)
 
     for parameter in model.parameters():
@@ -100,11 +138,18 @@ def worker(args):
         "receptor_flow.res_chi_final_layer.",
     )
     for name, parameter in model.named_parameters():
-        if name.startswith("condition_adapter.") or name.startswith(peptide_prefixes) or name.startswith(receptor_prefixes):
+        if name.startswith(("condition_adapter.", "clock_conditioner.")) or name.startswith(peptide_prefixes) or name.startswith(receptor_prefixes):
             parameter.requires_grad = True
             selected[name] = parameter
     if not selected:
         raise RuntimeError("trainable parameter selection is empty")
+    trainable_parameter_count = sum(parameter.numel() for parameter in selected.values())
+    parameter_budget = experiment_config["model"]["codesign_parameter_budget_max"]
+    if trainable_parameter_count > parameter_budget:
+        raise RuntimeError(
+            f"codesign trainable parameters {trainable_parameter_count} exceed "
+            f"YAML budget {parameter_budget}"
+        )
 
     collate = PaddingCollate(eight=False)
     graph_cache_root = Path(args.graph_cache)
@@ -200,16 +245,44 @@ def worker(args):
         raise RuntimeError(f"too many preprocessing failures: {preprocessing_failures}")
 
     def peptide_batch(item):
-        return recursive_to(collate([item]), device)
+        batch = recursive_to(collate([item]), device)
+        candidates = torch.nonzero(
+            batch["generate_mask"][0].bool(), as_tuple=False
+        ).flatten()
+        count = max(1, round(args.sequence_mask_probability * len(candidates)))
+        digest = hashlib.sha256(str(item["id"]).encode("utf-8")).digest()
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(args.seed + int.from_bytes(digest[:4], "little"))
+        chosen = candidates.cpu()[torch.randperm(len(candidates), generator=generator)[:count]]
+        sequence_mask = torch.zeros_like(batch["generate_mask"], dtype=torch.bool)
+        sequence_mask[0, chosen.to(sequence_mask.device)] = True
+        batch["sequence_generate_mask"] = sequence_mask
+        return batch
 
     def target_on_device(target):
         return {name: value.to(device) for name, value in target.items()}
 
-    def graph_batch(graph, noise=0.0):
+    time_range = experiment_config["training_time"]["range"]
+    synchronize_probability = experiment_config["training_time"]["synchronize_probability"]
+
+    def sample_clock_times(batch_size=1):
+        low, high = time_range
+        peptide_time = low + (high - low) * torch.rand(batch_size, device=device)
+        pocket_time = low + (high - low) * torch.rand(batch_size, device=device)
+        synchronize = torch.rand(batch_size, device=device) < synchronize_probability
+        pocket_time = torch.where(synchronize, peptide_time, pocket_time)
+        return {
+            "peptide_seq": peptide_time,
+            "peptide_struct": peptide_time,
+            "pocket_struct": pocket_time,
+        }
+
+    def graph_batch(graph, pocket_time, noise=0.0):
         copied = copy.deepcopy(graph)
         if noise:
             copied["ligand"].pos = copied["ligand"].pos + noise * torch.randn_like(copied["ligand"].pos)
-        set_time(copied, args.time, args.time, args.time, args.time, args.time, args.time,
+        pocket_time = float(pocket_time.reshape(-1)[0])
+        set_time(copied, pocket_time, pocket_time, pocket_time, pocket_time, pocket_time, pocket_time,
                  batchsize=1, all_atoms=False, device=None)
         return Batch.from_data_list([copied]).to(device)
 
@@ -233,7 +306,7 @@ def worker(args):
         chi_term = (chi.square() * chi_weight).sum() / (chi_weight.sum() + 1e-8)
         return tr_term + args.rotation_weight * rot_term + args.chi_weight * chi_term
 
-    def peptide_denoising(batch, fixed_seed):
+    def peptide_denoising(batch, fixed_seed, clock_times):
         target_trans = model.peptide_flow.encode(batch)[1]
         mask, captured = batch["generate_mask"].bool(), {}
 
@@ -246,17 +319,29 @@ def worker(args):
             with torch.random.fork_rng(devices=[device]):
                 torch.manual_seed(fixed_seed)
                 torch.cuda.manual_seed_all(fixed_seed)
-                losses = model.peptide_flow(batch)
+                clock_context = model.clock_conditioner(clock_times)
+                losses, auxiliary = model.peptide_flow(
+                    batch,
+                    t=clock_times["peptide_struct"],
+                    clock_context=clock_context,
+                    return_aux=True,
+                )
         finally:
             handle.remove()
 
         def rmsd(trans):
             return float(torch.sqrt(((trans - target_trans).square().sum(-1))[mask].mean()))
 
+        sequence_mask = auxiliary["sequence_generate_mask"]
+        sequence_recovery = (
+            auxiliary["sequence_prediction"][sequence_mask]
+            == batch["aa"].clamp(0, 19)[sequence_mask]
+        ).float().mean()
         return {
             "noisy_ca_rmsd": rmsd(captured["noisy"]),
             "peptide_pose_rmsd": rmsd(captured["predicted"]),
             "peptide_flow_loss": float(sum_weighted_losses(losses, config.train.loss_weights)),
+            "sequence_recovery": float(sequence_recovery),
         }
 
     def evaluate_case(case_id, split_name, phase):
@@ -267,12 +352,15 @@ def worker(args):
         model.eval()
         with torch.no_grad():
             for index in range(2):
+                clock_times = sample_clock_times()
+                clock_context = model.clock_conditioner(clock_times)
                 outputs = {}
                 for control in ("normal", "shuffle", "zero"):
                     condition = batches[1 - index] if control == "shuffle" else None
                     outputs[control] = model.receptor_forward(
-                        batches[index], graph_batch(data["graphs"][index]),
+                        batches[index], graph_batch(data["graphs"][index], clock_times["pocket_struct"]),
                         condition_batch=condition, zero_condition=(control == "zero"),
+                        clock_context=clock_context,
                     )
                 normal = outputs["normal"]
                 correct = component_error(normal, targets[index])[0]
@@ -289,7 +377,8 @@ def worker(args):
                     (targets[index]["anchor_pos"][pocket] - targets[index]["target_pos"][pocket]).square().sum(-1).mean()
                 )
                 denoising = peptide_denoising(
-                    batches[index], args.seed + 100000 + 1000 * list(case_records).index(case_id) + index
+                    batches[index], args.seed + 100000 + 1000 * list(case_records).index(case_id) + index,
+                    clock_times,
                 )
                 rows.append({
                     "phase": phase, "split": split_name, "case_id": case_id, "state": index,
@@ -302,7 +391,6 @@ def worker(args):
                     "anchor_pocket_rmsd": float(anchor_rmsd), "pocket_rmsd": float(pocket_rmsd),
                     "pocket_rmsd_improvement": float(anchor_rmsd - pocket_rmsd),
                     "receptor_movement_magnitude": float(torch.sqrt(tr.square().sum(-1).mean())),
-                    "sequence_recovery": None,
                 })
         del batches, targets
         torch.cuda.empty_cache()
@@ -313,7 +401,9 @@ def worker(args):
         for case_id in case_ids:
             evaluation_rows.extend(evaluate_case(case_id, split_name, "before"))
 
-    optimizer = torch.optim.AdamW(selected.values(), lr=args.learning_rate, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(
+        selected.values(), lr=args.learning_rate, weight_decay=args.weight_decay
+    )
     training_rows, order, cursor = [], [], 0
     model.eval()
     for step in range(1, args.steps + 1):
@@ -326,15 +416,20 @@ def worker(args):
         optimizer.zero_grad(set_to_none=True)
         accumulators = {name: [] for name in (
             "loss", "peptide_loss", "endpoint_loss", "ranking_loss", "relaxation_loss",
-            "translation_loss", "rotation_loss", "chi_loss",
+            "translation_loss", "rotation_loss", "chi_loss", "sequence_loss",
+            "sequence_recovery", "peptide_time", "pocket_time",
         )}
         for case_id in case_batch:
             data = load_case(case_id)
             batches = [peptide_batch(item) for item in data["peptide_items"]]
             targets = [target_on_device(target) for target in data["targets"]]
             for index in range(2):
-                peptide_losses, output = model(
-                    batches[index], graph_batch(data["graphs"][index], args.peptide_noise)
+                clock_times = sample_clock_times()
+                peptide_losses, output, auxiliary = model(
+                    batches[index],
+                    graph_batch(data["graphs"][index], clock_times["pocket_struct"], args.peptide_noise),
+                    clock_times=clock_times,
+                    return_aux=True,
                 )
                 peptide_value = sum_weighted_losses(peptide_losses, config.train.loss_weights)
                 correct, tr_loss, rot_loss, chi_loss = component_error(output, targets[index])
@@ -345,12 +440,21 @@ def worker(args):
                     args.peptide_weight * peptide_value + correct
                     + args.ranking_weight * ranking + args.relaxation_weight * relaxation
                 )
+                sequence_mask = auxiliary["sequence_generate_mask"]
+                sequence_recovery = (
+                    auxiliary["sequence_prediction"][sequence_mask]
+                    == batches[index]["aa"].clamp(0, 19)[sequence_mask]
+                ).float().mean()
                 (total / (2 * len(case_batch))).backward()
                 for name, value in (
                     ("loss", total),
                     ("peptide_loss", peptide_value), ("endpoint_loss", correct),
                     ("ranking_loss", ranking), ("relaxation_loss", relaxation),
                     ("translation_loss", tr_loss), ("rotation_loss", rot_loss), ("chi_loss", chi_loss),
+                    ("sequence_loss", peptide_losses["seqs_loss"]),
+                    ("sequence_recovery", sequence_recovery),
+                    ("peptide_time", clock_times["peptide_struct"].mean()),
+                    ("pocket_time", clock_times["pocket_struct"].mean()),
                 ):
                     accumulators[name].append(value.detach())
             del batches, targets
@@ -371,14 +475,12 @@ def worker(args):
         numeric = (
             "peptide_pose_rmsd", "peptide_flow_loss", "endpoint_error", "correct_state_margin",
             "shuffle_degradation", "anchor_pocket_rmsd", "pocket_rmsd",
-            "pocket_rmsd_improvement", "receptor_movement_magnitude",
+            "pocket_rmsd_improvement", "receptor_movement_magnitude", "sequence_recovery",
         )
         return {
             "states": len(rows),
             **{name: sum(row[name] for row in rows) / len(rows) for name in numeric},
             "correct_state_accuracy": sum(row["selected_correct"] for row in rows) / len(rows),
-            "sequence_recovery": None,
-            "sequence_recovery_status": "not_enabled_until_pose_and_selectivity_gate_passes",
         }
 
     result_dir = Path(args.result_dir)
@@ -400,11 +502,15 @@ def worker(args):
     }
     summary = {
         "parameters": {"total": sum(p.numel() for p in model.parameters()),
-                       "trainable": sum(p.numel() for p in selected.values()), "names": list(selected)},
+                       "trainable": trainable_parameter_count,
+                       "budget": parameter_budget, "names": list(selected)},
         "pepflow_initialization": "checkpoint",
         "pepflow_checkpoint_sha256": sha256(args.pepflow_checkpoint),
         "dataset_manifest_sha256": sha256(data_dir / "manifest.json"),
         "split": args.split, "train_cases": train_ids, "evaluation_cases": evaluation_ids,
+        "run_name": args.run_name,
+        "sequence_mask_probability": args.sequence_mask_probability,
+        "clock_slot_order": experiment_config["clocks"]["embedding"]["slot_order"],
         "preprocessing_failures": preprocessing_failures, "aggregates": aggregates,
         "initial_loss": training_rows[0]["loss"], "final_loss": training_rows[-1]["loss"],
         "small_batch_gate": bool(
@@ -426,6 +532,8 @@ def main():
     parser.add_argument("--pepflow-config", default="pepflow/configs/learn_angle.yaml")
     parser.add_argument("--pepflow-checkpoint", required=True)
     parser.add_argument("--dynamicbind-checkpoint", default="ema_inference_epoch314_model.pt")
+    parser.add_argument("--experiment-config", required=True)
+    parser.add_argument("--run-name")
     parser.add_argument("--split", default="random_complex", choices=("random_complex", "peptide_cluster", "receptor_family_proxy"))
     parser.add_argument("--visible-gpus", default="5")
     parser.add_argument("--steps", type=int, default=100)
@@ -435,7 +543,6 @@ def main():
     parser.add_argument("--minimum-train-cases", type=int, default=2)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--peptide-noise", type=float, default=0.5)
-    parser.add_argument("--time", type=float, default=0.6)
     parser.add_argument("--peptide-weight", type=float, default=0.1)
     parser.add_argument("--rotation-weight", type=float, default=0.33)
     parser.add_argument("--chi-weight", type=float, default=0.33)
@@ -443,10 +550,13 @@ def main():
     parser.add_argument("--ranking-margin", type=float, default=0.1)
     parser.add_argument("--relaxation-weight", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--sequence-mask-probability", type=float, default=0.30)
     parser.add_argument("--seed", type=int, default=20260727)
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--result-dir")
     args = parser.parse_args()
+    apply_experiment_config(args)
     if args.worker:
         worker(args)
         return 0
@@ -458,12 +568,13 @@ def main():
         "dynamicbind_checkpoint": Path(args.model_dir).resolve() / args.dynamicbind_checkpoint,
         "pepflow_config": (REPO_ROOT / args.pepflow_config).resolve(),
         "pepflow_checkpoint": Path(args.pepflow_checkpoint).resolve(),
+        "experiment_config": Path(args.experiment_config).resolve(),
     }
     for path in paths.values():
         if not path.is_file():
             raise FileNotFoundError(path)
     started, start_clock = datetime.now().astimezone(), time.monotonic()
-    result_dir = RESULTS_ROOT / started.strftime("%Y%m%d-%H%M%S%z")
+    result_dir = RESULTS_ROOT / args.run_name / started.strftime("%Y%m%d-%H%M%S%z")
     result_dir.mkdir(parents=True)
     commit, message = git("rev-parse", "HEAD"), git("log", "-1", "--format=%B")
     command = [sys.executable, str(Path(__file__).resolve()), "--worker"]
@@ -481,6 +592,9 @@ def main():
         "gpu_before": gpu_snapshot(), "gpu_after": None,
     }
     (result_dir / "commit.txt").write_text(f"{commit}\n{message.strip()}\n", encoding="utf-8")
+    (result_dir / "experiment_config.yaml").write_text(
+        Path(args.experiment_config).read_text(encoding="utf-8"), encoding="utf-8"
+    )
     (result_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     environment = os.environ.copy()
     environment["CUDA_VISIBLE_DEVICES"] = args.visible_gpus
