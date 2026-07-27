@@ -82,9 +82,16 @@ class FlowModel(nn.Module):
         # batch['torsion_angle_mask'] = batch['torsion_angle_mask'][:,:,1:]
         angles_1 = batch['torsion_angle']
 
-        context_mask = torch.logical_and(batch['mask_heavyatom'][:, :, BBHeavyAtom.CA], ~batch['generate_mask'])
-        structure_mask = context_mask if self.sample_structure else None
-        sequence_mask = context_mask if self.sample_sequence else None
+        residue_mask = batch['mask_heavyatom'][:, :, BBHeavyAtom.CA].bool()
+        structure_context_mask = torch.logical_and(
+            residue_mask, ~batch['generate_mask'].bool()
+        )
+        sequence_generate_mask = batch.get(
+            'sequence_generate_mask', batch['generate_mask']
+        ).bool()
+        sequence_context_mask = torch.logical_and(residue_mask, ~sequence_generate_mask)
+        structure_mask = structure_context_mask if self.sample_structure else None
+        sequence_mask = sequence_context_mask if self.sample_sequence else None
         node_embed = self.node_embedder(batch['aa'], batch['res_nb'], batch['chain_nb'], batch['pos_heavyatom'], 
                                         batch['mask_heavyatom'], structure_mask=structure_mask, sequence_mask=sequence_mask)
         edge_embed = self.edge_embedder(batch['aa'], batch['res_nb'], batch['chain_nb'], batch['pos_heavyatom'], 
@@ -108,10 +115,15 @@ class FlowModel(nn.Module):
     def seq_to_simplex(self,seqs):
         return clampped_one_hot(seqs, self.K).float() * self.k * 2 - self.k # (B,L,K)
     
-    def forward(self, batch, t=None, clock_context=None):
+    def forward(self, batch, t=None, clock_context=None, return_aux=False):
 
         num_batch, num_res = batch['aa'].shape
         gen_mask,res_mask,angle_mask = batch['generate_mask'].long(),batch['res_mask'].long(),batch['torsion_angle_mask'].long()
+        sequence_generate_mask = batch.get(
+            'sequence_generate_mask', batch['generate_mask']
+        ).bool()
+        if torch.any(sequence_generate_mask & ~batch['generate_mask'].bool()):
+            raise ValueError('sequence_generate_mask must be a subset of generate_mask')
 
         #encode
         rotmats_1, trans_1, angles_1, seqs_1, node_embed, edge_embed = self.encode(batch) # no generate mask
@@ -152,10 +164,10 @@ class FlowModel(nn.Module):
                 seqs_0_simplex = self.k * torch.randn_like(seqs_1_simplex) # (B,L,K)
                 seqs_0_prob = F.softmax(seqs_0_simplex,dim=-1) # (B,L,K)
                 seqs_t_simplex = ((1 - t[..., None]) * seqs_0_simplex) + (t[..., None] * seqs_1_simplex) # (B,L,K)
-                seqs_t_simplex = torch.where(batch['generate_mask'][...,None],seqs_t_simplex,seqs_1_simplex)
+                seqs_t_simplex = torch.where(sequence_generate_mask[...,None],seqs_t_simplex,seqs_1_simplex)
                 seqs_t_prob = F.softmax(seqs_t_simplex,dim=-1) # (B,L,K)
                 seqs_t = sample_from(seqs_t_prob) # (B,L)
-                seqs_t = torch.where(batch['generate_mask'],seqs_t,seqs_1)
+                seqs_t = torch.where(sequence_generate_mask,seqs_t,seqs_1)
             else:
                 seqs_t = seqs_1.detach().clone()
                 seqs_t_simplex = seqs_1_simplex.detach().clone()
@@ -164,7 +176,7 @@ class FlowModel(nn.Module):
         # denoise
         pred_rotmats_1, pred_trans_1, pred_angles_1, pred_seqs_1_prob  = self.ga_encoder(t, rotmats_t, trans_t_c, angles_t, seqs_t, node_embed, edge_embed, gen_mask, res_mask, clock_context=clock_context)
         pred_seqs_1 = sample_from(F.softmax(pred_seqs_1_prob,dim=-1))
-        pred_seqs_1 = torch.where(batch['generate_mask'],pred_seqs_1,torch.clamp(seqs_1,0,19))
+        pred_seqs_1 = torch.where(sequence_generate_mask,pred_seqs_1,torch.clamp(seqs_1,0,19))
         pred_trans_1_c,_ = self.zero_center_part(pred_trans_1,gen_mask,res_mask)
         pred_trans_1_c = pred_trans_1 # implicitly enforce zero center in gen_mask, in this way, we dont need to move receptor when sampling
 
@@ -195,7 +207,8 @@ class FlowModel(nn.Module):
 
         # seqs vf loss
         seqs_loss = F.cross_entropy(pred_seqs_1_prob.view(-1,pred_seqs_1_prob.shape[-1]),torch.clamp(seqs_1,0,19).view(-1), reduction='none').view(pred_seqs_1_prob.shape[:-1]) # (N,L), not softmax
-        seqs_loss = torch.sum(seqs_loss * gen_mask, dim=-1) / (torch.sum(gen_mask,dim=-1) + 1e-8)
+        seq_mask_float = sequence_generate_mask.to(seqs_loss.dtype)
+        seqs_loss = torch.sum(seqs_loss * seq_mask_float, dim=-1) / (torch.sum(seq_mask_float,dim=-1) + 1e-8)
         seqs_loss = torch.mean(seqs_loss)
 
         # we should not use angle mask, as you dont know aa type when generating
@@ -221,13 +234,21 @@ class FlowModel(nn.Module):
         torsion_loss = torch.sum((pred_angles_1_vec - angles_1_vec)**2*angle_mask_loss,dim=(-1,-2)) / (torch.sum(angle_mask_loss,dim=(-1,-2)) + 1e-8) # (B,)
         torsion_loss = torch.mean(torsion_loss)
 
-        return {
+        losses = {
             "trans_loss": trans_loss,
             'rot_loss': rot_loss,
             'bb_atom_loss': bb_atom_loss,
             'seqs_loss': seqs_loss,
             'angle_loss': angle_loss,
             'torsion_loss': torsion_loss,
+        }
+        if not return_aux:
+            return losses
+        return losses, {
+            'sequence_logits': pred_seqs_1_prob,
+            'sequence_prediction': pred_seqs_1,
+            'sequence_generate_mask': sequence_generate_mask,
+            'peptide_time': t,
         }
     
     @torch.no_grad()

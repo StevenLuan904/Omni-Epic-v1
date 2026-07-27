@@ -167,7 +167,9 @@ class JointPeptideReceptorFlow(nn.Module):
         ):
             return self.receptor_flow(receptor_graph)
 
-    def forward(self, peptide_batch, receptor_graph, clock_times=None):
+    def forward(
+        self, peptide_batch, receptor_graph, clock_times=None, return_aux=False,
+    ):
         clock_context = None
         peptide_time = None
         if self.clock_conditioner is not None:
@@ -184,9 +186,16 @@ class JointPeptideReceptorFlow(nn.Module):
             clock_context = self.clock_conditioner(clock_times)
             peptide_time = clock_times["peptide_struct"].reshape(-1, 1)
         peptide_losses = self.peptide_flow(
-            peptide_batch, t=peptide_time, clock_context=clock_context
+            peptide_batch,
+            t=peptide_time,
+            clock_context=clock_context,
+            return_aux=return_aux,
         )
         receptor_outputs = self.receptor_forward(
             peptide_batch, receptor_graph, clock_context=clock_context
         )
-        return peptide_losses, receptor_outputs
+        if not return_aux:
+            return peptide_losses, receptor_outputs
+        peptide_losses, peptide_aux = peptide_losses
+        peptide_aux['clock_times'] = clock_times
+        return peptide_losses, receptor_outputs, peptide_aux
