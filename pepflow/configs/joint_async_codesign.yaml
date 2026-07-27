@@ -154,7 +154,12 @@ rosetta:
   protocol: InterfaceAnalyzer
   score_field: dG_separated
   direction: minimize
+  peptide_chain: A
   repack: true
   minimize: true
+  minimizer: lbfgs_armijo_nonmonotone
+  minimizer_tolerance: 0.01
+  contact_cutoff_angstrom: 5.0
+  clash_cutoff_angstrom: 2.0
   samples_per_design: 16
   report_quantiles: [0.10, 0.25, 0.50, 0.75, 0.90]
