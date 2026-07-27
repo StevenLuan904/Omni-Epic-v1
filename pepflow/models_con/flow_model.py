@@ -252,10 +252,18 @@ class FlowModel(nn.Module):
         }
     
     @torch.no_grad()
-    def sample(self, batch, num_steps = 100, sample_bb=True, sample_ang=True, sample_seq=True):
+    def sample(
+        self, batch, num_steps=100, sample_bb=True, sample_ang=True,
+        sample_seq=True, clock_context_fn=None,
+    ):
 
         num_batch, num_res = batch['aa'].shape
         gen_mask,res_mask = batch['generate_mask'],batch['res_mask']
+        sequence_generate_mask = batch.get(
+            'sequence_generate_mask', batch['generate_mask']
+        ).bool()
+        if torch.any(sequence_generate_mask & ~batch['generate_mask'].bool()):
+            raise ValueError('sequence_generate_mask must be a subset of generate_mask')
         K = self._interpolant_cfg.seqs.num_classes
         k = self._interpolant_cfg.seqs.simplex_value
         angle_mask_loss = torsions_mask.to(batch['aa'].device)
@@ -294,8 +302,8 @@ class FlowModel(nn.Module):
             seqs_0_simplex = k * torch.randn((num_batch,num_res,K), device=batch['aa'].device)
             seqs_0_prob = F.softmax(seqs_0_simplex,dim=-1)
             seqs_0 = sample_from(seqs_0_prob)
-            seqs_0 = torch.where(batch['generate_mask'],seqs_0,seqs_1)
-            seqs_0_simplex = torch.where(batch['generate_mask'][...,None],seqs_0_simplex,seqs_1_simplex)
+            seqs_0 = torch.where(sequence_generate_mask,seqs_0,seqs_1)
+            seqs_0_simplex = torch.where(sequence_generate_mask[...,None],seqs_0_simplex,seqs_1_simplex)
         else:
             seqs_0 = seqs_1.detach().clone()
             seqs_0_prob = seqs_1_prob.detach().clone()
@@ -311,8 +319,9 @@ class FlowModel(nn.Module):
         # denoise loop
         for t_2 in ts[1:]:
             t = torch.ones((num_batch, 1), device=batch['aa'].device) * t_1
+            clock_context = None if clock_context_fn is None else clock_context_fn(t[:, 0])
             # rots
-            pred_rotmats_1, pred_trans_1, pred_angles_1, pred_seqs_1_prob = self.ga_encoder(t, rotmats_t_1, trans_t_1_c, angles_t_1, seqs_t_1, node_embed, edge_embed, batch['generate_mask'].long(), batch['res_mask'].long())
+            pred_rotmats_1, pred_trans_1, pred_angles_1, pred_seqs_1_prob = self.ga_encoder(t, rotmats_t_1, trans_t_1_c, angles_t_1, seqs_t_1, node_embed, edge_embed, batch['generate_mask'].long(), batch['res_mask'].long(), clock_context=clock_context)
             pred_rotmats_1 = torch.where(batch['generate_mask'][...,None,None],pred_rotmats_1,rotmats_1)
             # trans, move center
             # pred_trans_1_c,center = self.zero_center_part(pred_trans_1,gen_mask,res_mask)
@@ -321,7 +330,7 @@ class FlowModel(nn.Module):
             pred_angles_1 = torch.where(batch['generate_mask'][...,None],pred_angles_1,angles_1)
             # seqs
             pred_seqs_1 = sample_from(F.softmax(pred_seqs_1_prob,dim=-1))
-            pred_seqs_1 = torch.where(batch['generate_mask'],pred_seqs_1,seqs_1)
+            pred_seqs_1 = torch.where(sequence_generate_mask,pred_seqs_1,seqs_1)
             pred_seqs_1_simplex = self.seq_to_simplex(pred_seqs_1)
             # seq-angle
             torsion_mask = angle_mask_loss[pred_seqs_1.reshape(-1)].reshape(num_batch,num_res,-1) # (B,L,5)
@@ -351,8 +360,11 @@ class FlowModel(nn.Module):
             angles_t_2 = torch.where(batch['generate_mask'][...,None],angles_t_2,angles_1)
             # seqs
             seqs_t_2_simplex = seqs_t_1_simplex + (pred_seqs_1_simplex - seqs_0_simplex) * d_t[...,None]
+            seqs_t_2_simplex = torch.where(
+                sequence_generate_mask[..., None], seqs_t_2_simplex, seqs_1_simplex
+            )
             seqs_t_2 = sample_from(F.softmax(seqs_t_2_simplex,dim=-1))
-            seqs_t_2 = torch.where(batch['generate_mask'],seqs_t_2,seqs_1)
+            seqs_t_2 = torch.where(sequence_generate_mask,seqs_t_2,seqs_1)
             # seq-angle
             torsion_mask = angle_mask_loss[seqs_t_2.reshape(-1)].reshape(num_batch,num_res,-1) # (B,L,5)
             angles_t_2 = torch.where(torsion_mask.bool(),angles_t_2,torch.zeros_like(angles_t_2))
@@ -370,7 +382,8 @@ class FlowModel(nn.Module):
         # final step
         t_1 = ts[-1]
         t = torch.ones((num_batch, 1), device=batch['aa'].device) * t_1
-        pred_rotmats_1, pred_trans_1, pred_angles_1, pred_seqs_1_prob = self.ga_encoder(t, rotmats_t_1, trans_t_1_c, angles_t_1, seqs_t_1, node_embed, edge_embed, batch['generate_mask'].long(), batch['res_mask'].long())
+        clock_context = None if clock_context_fn is None else clock_context_fn(t[:, 0])
+        pred_rotmats_1, pred_trans_1, pred_angles_1, pred_seqs_1_prob = self.ga_encoder(t, rotmats_t_1, trans_t_1_c, angles_t_1, seqs_t_1, node_embed, edge_embed, batch['generate_mask'].long(), batch['res_mask'].long(), clock_context=clock_context)
         pred_rotmats_1 = torch.where(batch['generate_mask'][...,None,None],pred_rotmats_1,rotmats_1)
         # move center
         # pred_trans_1_c,center = self.zero_center_part(pred_trans_1,gen_mask,res_mask)
@@ -379,7 +392,7 @@ class FlowModel(nn.Module):
         pred_angles_1 = torch.where(batch['generate_mask'][...,None],pred_angles_1,angles_1)
         # seqs
         pred_seqs_1 = sample_from(F.softmax(pred_seqs_1_prob,dim=-1))
-        pred_seqs_1 = torch.where(batch['generate_mask'],pred_seqs_1,seqs_1)
+        pred_seqs_1 = torch.where(sequence_generate_mask,pred_seqs_1,seqs_1)
         pred_seqs_1_simplex = self.seq_to_simplex(pred_seqs_1)
         # seq-angle
         torsion_mask = angle_mask_loss[pred_seqs_1.reshape(-1)].reshape(num_batch,num_res,-1) # (B,L,5)
