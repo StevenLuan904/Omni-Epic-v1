@@ -143,10 +143,10 @@ generation:
   sample_torsion: true
   geometric_clash_relaxation:
     enabled: true
-    target_distance_angstrom: 2.1
-    steps: 200
+    target_distance_angstrom: 2.2
+    steps: 500
     learning_rate: 0.05
-    translation_tether: 0.01
+    translation_tether: 0.0001
 
 model:
   baseline_trainable_parameters: 19301120
