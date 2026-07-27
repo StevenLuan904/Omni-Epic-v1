@@ -105,7 +105,12 @@ def save_samples_sc(samples,save_dir):
     pos_ha,_,_ = full_atom_reconstruction(R_bb=samples['rotmats'],t_bb=samples['trans'],angles=samples['angles'],aa=samples['seqs']) # (32,L,14,3), instead of 15, ignore OXT masked
     pos_ha = F.pad(pos_ha, pad=(0,0,0,15-14), value=0.) # (32,L,A,3) pos14 A=14
     pos_new = torch.where(batch['generate_mask'][:,:,None,None],pos_ha,batch['pos_heavyatom'])
-    mask_new = get_heavyatom_mask(samples['seqs'])
+    generated_atom_mask = get_heavyatom_mask(samples['seqs'])
+    mask_new = torch.where(
+        batch['generate_mask'][:, :, None],
+        generated_atom_mask,
+        batch['mask_heavyatom'],
+    )
     aa_new = samples['seqs']
     for i in range(nums):
         data_saved = {
