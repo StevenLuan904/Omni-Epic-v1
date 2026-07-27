@@ -133,6 +133,15 @@ sampler:
       max_clock_lag: 0.05
       synchronize_every_accepted_steps: 2
 
+generation:
+  case_id: case-003-1iq5_B-5j7j_B
+  state: a
+  num_samples: 16
+  peptide_chain: Z
+  sample_sequence: true
+  sample_backbone: true
+  sample_torsion: true
+
 model:
   baseline_trainable_parameters: 19301120
   async_parameter_budget_max: 20000000
@@ -159,7 +168,7 @@ rosetta:
   protocol: InterfaceAnalyzer
   score_field: dG_separated
   direction: minimize
-  peptide_chain: A
+  peptide_chain: Z
   repack: true
   minimize: true
   minimizer: lbfgs_armijo_nonmonotone
