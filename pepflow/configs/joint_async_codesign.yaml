@@ -6,9 +6,11 @@ experiment:
 
 clocks:
   registry:
-    peptide:
-      components: [peptide_seq, peptide_struct]
-    receptor:
+    peptide_seq:
+      component: peptide_sequence
+    peptide_struct:
+      component: peptide_structure
+    pocket_struct:
       components: [receptor_backbone, receptor_sidechain]
   embedding:
     scalar_encoder: fourier
@@ -19,15 +21,16 @@ clocks:
     projection_layers: 2
     activation: silu
     max_clock_inputs_per_module: 3
-    inactive_clock_fill: zeros
+    slot_order: [peptide_seq, peptide_struct, pocket_struct]
   module_inputs:
-    peptide_seq: [peptide, receptor, null]
-    peptide_struct: [peptide, receptor, null]
-    receptor: [receptor, peptide, null]
+    peptide_seq: [peptide_seq, peptide_struct, pocket_struct]
+    peptide_struct: [peptide_seq, peptide_struct, pocket_struct]
+    pocket_struct: [peptide_seq, peptide_struct, pocket_struct]
 
 training_time:
   sampling: independent_uniform
   range: [0.0, 1.0]
+  tied_clock_groups: [[peptide_seq, peptide_struct]]
   synchronize_probability: 0.10
 
 sampler:

@@ -14,22 +14,25 @@
 ## 多时钟 conditioning
 
 每个 clock 先用高维 Fourier embedding 编码，再加入 learned clock-type embedding，
-形成带名字的 time token。当前 token 集为 `{peptide, receptor}`：
+形成带名字的 time embedding。三个固定 slot 依次为
+`{peptide_seq, peptide_struct, pocket_struct}`：
 
-- peptide module 显式接收并注入 `E(t_peptide)` 和 `E(t_receptor)`；
-- receptor module 显式接收并注入 `E(t_receptor)` 和 `E(t_peptide)`；
-- own-time、peer-time 与 state embedding 按固定顺序 concat，再经过小型 projection
-  MLP 注入各自模块，不只放进共享 adapter；当前不增加 attention 模块。
+- peptide sequence、peptide structure 和 pocket structure 模块都显式接收并注入
+  三个 slot；
+- 当前 `t_peptide_seq = t_peptide_struct`，但两者仍分别编码并占据固定 slot；
+- `t_pocket_struct` 独立采样，未来可直接解除前两个 clock 的绑定；
+- 三个 time embeddings 按固定顺序 concat，再经过小型 projection MLP 注入各自模块，
+  不只放进共享 adapter；当前不增加 attention 模块。
 
 建议每个 scalar clock 使用 256 维 Fourier embedding、32 维 clock-type embedding，
-concat 后投影到 512 维。每个模块使用三个有序 clock slot，未使用 slot 填零；当前
-分别放 own-time、peer-time、一个空 slot。未来拆分 `peptide_seq`/`peptide_struct`
-时只需注册新 clock 并填入预留 slot，projection 输入维度和旧 checkpoint 接口不变。
-只有 clock 数量超过预留容量后，才另做 attention/gated fusion 消融。
+concat 后投影到 512 维。三个 slot 的位置和语义固定，不按模块交换 own/peer 顺序，
+也不存在空 slot。只有未来增加第四类异步 flow 时，才调整 projection 输入并另做
+attention/gated fusion 消融。
 
 ## Flow matching 与 schedule
 
-训练时分别采样 `t_peptide`、`t_receptor` 并监督各自 vector field；推理时的
+训练时采样共享的 `t_peptide_seq=t_peptide_struct` 与独立的 `t_pocket_struct`，并监督
+各自 vector field；推理时的
 `N_p/N_r` 只是 ODE 数值积分 schedule，不是 flow matching 本身的假设。
 `N_p=2N_r` 只有在 peptide vector field 曲率更大或 receptor 应缓慢松弛时才可能
 更好，因此不能直接设为唯一方案。

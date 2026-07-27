@@ -16,10 +16,10 @@ peptide structure 和适配后的 receptor pocket。设计任务不存在对应 
   和多时钟 Fourier encoder；各 clock embedding 采用固定 slot concat + projection，
   当前不增加 attention 模块。
 - 新增 peptide sequence categorical flow/head，输出 amino-acid logits。
-- 当前 codesign 阶段 `peptide_seq` 与 `peptide_struct` 仍共享 `peptide` clock；两个
-  peptide 模块都显式注入 peptide/receptor time embeddings。
-- receptor module 同样显式注入 receptor/peptide time embeddings。未来需要内部异步
-  时，将 `peptide` 拆为 `peptide_seq`、`peptide_struct` 两个命名 token 即可。
+- 三个固定 time slot 依次为 `peptide_seq`、`peptide_struct`、`pocket_struct`；所有模块
+  均以这个固定顺序显式注入三个 time embeddings，不使用空 slot 或 own/peer 重排。
+- 当前 codesign 阶段令 `t_peptide_seq = t_peptide_struct`，但两者分别编码；
+  `t_pocket_struct` 独立。未来 peptide 内部异步时只需解除前两个 clock 的绑定。
 - 分阶段解冻：sequence head → adapter/receptor flow → PepFlow structure layers。
 
 ## 小数据过拟合
