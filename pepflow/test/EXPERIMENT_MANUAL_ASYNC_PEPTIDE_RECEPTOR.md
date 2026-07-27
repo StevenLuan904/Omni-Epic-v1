@@ -23,7 +23,7 @@
 
 建议每个 scalar clock 使用 256 维 Fourier embedding、32 维 clock-type embedding，
 concat 后投影到 512 维。每个模块预留四个有序 clock slot，未使用 slot 填零；当前
-分别放 own-time、peer-time、两个空 slot。未来拆分 `peptide_seq`/`peptide_struct`
+分别放 own-time、peer-time、一个空 slot。未来拆分 `peptide_seq`/`peptide_struct`
 时只需注册新 clock 并填入预留 slot，projection 输入维度和旧 checkpoint 接口不变。
 只有 clock 数量超过预留容量后，才另做 attention/gated fusion 消融。
 

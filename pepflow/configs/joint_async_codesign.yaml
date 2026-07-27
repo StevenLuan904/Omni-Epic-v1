@@ -18,12 +18,12 @@ clocks:
     fusion: ordered_concat_mlp
     projection_layers: 2
     activation: silu
-    max_clock_inputs_per_module: 4
+    max_clock_inputs_per_module: 3
     inactive_clock_fill: zeros
   module_inputs:
-    peptide_seq: [peptide, receptor, null, null]
-    peptide_struct: [peptide, receptor, null, null]
-    receptor: [receptor, peptide, null, null]
+    peptide_seq: [peptide, receptor, null]
+    peptide_struct: [peptide, receptor, null]
+    receptor: [receptor, peptide, null]
 
 training_time:
   sampling: independent_uniform
