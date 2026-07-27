@@ -21,6 +21,9 @@
   三个 slot；
 - 当前 `t_peptide_seq = t_peptide_struct`，但两者仍分别编码并占据固定 slot；
 - `t_pocket_struct` 独立采样，未来可直接解除前两个 clock 的绑定；
+- 三个 slot 统一表示 `0=noise, 1=data` 的去噪进度。PepFlow 原生时间直接使用该值；
+  DynamicBind 原生时间的噪声方向相反，因此调用其网络时显式使用
+  `t_native=1-t_pocket_struct`；
 - 三个 time embeddings 按固定顺序 concat，再经过小型 projection MLP 注入各自模块，
   不只放进共享 adapter；当前不增加 attention 模块。
 

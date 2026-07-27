@@ -71,6 +71,11 @@ experiment:
       max_grad_norm: 10.0
 
 clocks:
+  semantics: denoising_progress_0_noise_1_data
+  native_time_mapping:
+    peptide_seq: identity
+    peptide_struct: identity
+    pocket_struct: one_minus_progress
   registry:
     peptide_seq:
       component: peptide_sequence

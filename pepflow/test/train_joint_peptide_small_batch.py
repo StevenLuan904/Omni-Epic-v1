@@ -274,6 +274,10 @@ def worker(args):
 
     time_range = experiment_config["training_time"]["range"]
     synchronize_probability = experiment_config["training_time"]["synchronize_probability"]
+    if experiment_config["clocks"]["semantics"] != "denoising_progress_0_noise_1_data":
+        raise ValueError("unsupported clock semantics")
+    if experiment_config["clocks"]["native_time_mapping"]["pocket_struct"] != "one_minus_progress":
+        raise ValueError("DynamicBind pocket time must map as one_minus_progress")
 
     def sample_clock_times(batch_size=1):
         low, high = time_range
@@ -291,8 +295,10 @@ def worker(args):
         copied = copy.deepcopy(graph)
         if noise:
             copied["ligand"].pos = copied["ligand"].pos + noise * torch.randn_like(copied["ligand"].pos)
-        pocket_time = float(pocket_time.reshape(-1)[0])
-        set_time(copied, pocket_time, pocket_time, pocket_time, pocket_time, pocket_time, pocket_time,
+        pocket_progress = float(pocket_time.reshape(-1)[0])
+        dynamicbind_time = 1.0 - pocket_progress
+        set_time(copied, dynamicbind_time, dynamicbind_time, dynamicbind_time,
+                 dynamicbind_time, dynamicbind_time, dynamicbind_time,
                  batchsize=1, all_atoms=False, device=None)
         return Batch.from_data_list([copied]).to(device)
 

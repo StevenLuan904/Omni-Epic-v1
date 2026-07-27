@@ -20,6 +20,8 @@ peptide structure 和适配后的 receptor pocket。设计任务不存在对应 
   均以这个固定顺序显式注入三个 time embeddings，不使用空 slot 或 own/peer 重排。
 - 当前 codesign 阶段令 `t_peptide_seq = t_peptide_struct`，但两者分别编码；
   `t_pocket_struct` 独立。未来 peptide 内部异步时只需解除前两个 clock 的绑定。
+- 三槽值统一采用 `0=noise, 1=data` 的去噪进度；DynamicBind 的原生扩散时间在调用
+  pocket flow 时转换为 `1-t_pocket_struct`，防止跨模块共享方向相反的时间语义。
 - 分阶段解冻：sequence head → adapter/receptor flow → PepFlow structure layers。
 
 ## 小数据过拟合
