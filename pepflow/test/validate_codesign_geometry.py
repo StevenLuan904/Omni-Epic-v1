@@ -53,6 +53,8 @@ def score_pdb(path, peptide_chain, contact_cutoff, clash_cutoff):
             minimum_interface_distance = min(minimum_interface_distance, value)
             contacts += value <= contact_cutoff
             clashes += value < clash_cutoff
+    ca_trace_valid = all(2.8 <= value <= 4.5 for value in ca_distances)
+    interface_present = contacts > 0
     return {
         "sample": path.name,
         "peptide_residues": len(peptide_ca),
@@ -61,11 +63,12 @@ def score_pdb(path, peptide_chain, contact_cutoff, clash_cutoff):
         "mean_adjacent_ca_distance": statistics.fmean(ca_distances),
         "min_adjacent_ca_distance": min(ca_distances),
         "max_adjacent_ca_distance": max(ca_distances),
-        "ca_trace_valid": all(2.8 <= value <= 4.5 for value in ca_distances),
+        "ca_trace_valid": ca_trace_valid,
         "interface_heavy_atom_contacts": contacts,
         "interface_heavy_atom_clashes": clashes,
         "minimum_interface_distance": minimum_interface_distance,
-        "interface_present": contacts > 0,
+        "interface_present": interface_present,
+        "steric_pass": ca_trace_valid and interface_present and clashes == 0,
     }
 
 
@@ -101,6 +104,8 @@ def worker(args):
         "failures": failures,
         "ca_trace_valid_fraction": sum(row["ca_trace_valid"] for row in rows) / len(rows) if rows else 0,
         "interface_present_fraction": sum(row["interface_present"] for row in rows) / len(rows) if rows else 0,
+        "steric_pass_samples": sum(row["steric_pass"] for row in rows),
+        "steric_pass_fraction": sum(row["steric_pass"] for row in rows) / len(rows) if rows else 0,
         "mean_interface_contacts": statistics.fmean(row["interface_heavy_atom_contacts"] for row in rows) if rows else None,
         "mean_interface_clashes": statistics.fmean(row["interface_heavy_atom_clashes"] for row in rows) if rows else None,
         "minimum_interface_distance": min(row["minimum_interface_distance"] for row in rows) if rows else None,
