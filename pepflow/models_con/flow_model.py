@@ -108,7 +108,7 @@ class FlowModel(nn.Module):
     def seq_to_simplex(self,seqs):
         return clampped_one_hot(seqs, self.K).float() * self.k * 2 - self.k # (B,L,K)
     
-    def forward(self, batch):
+    def forward(self, batch, t=None, clock_context=None):
 
         num_batch, num_res = batch['aa'].shape
         gen_mask,res_mask,angle_mask = batch['generate_mask'].long(),batch['res_mask'].long(),batch['torsion_angle_mask'].long()
@@ -123,8 +123,12 @@ class FlowModel(nn.Module):
         seqs_1_prob = F.softmax(seqs_1_simplex,dim=-1)
 
         with torch.no_grad():
-            t = torch.rand((num_batch,1), device=batch['aa'].device) 
-            t = t*(1-2 * self._interpolant_cfg.min_t) + self._interpolant_cfg.min_t # avoid 0
+            if t is None:
+                t = torch.rand((num_batch,1), device=batch['aa'].device)
+                t = t*(1-2 * self._interpolant_cfg.min_t) + self._interpolant_cfg.min_t # avoid 0
+            else:
+                t = t.to(device=batch['aa'].device, dtype=trans_1.dtype).reshape(num_batch, 1)
+                t = t.clamp(self._interpolant_cfg.min_t, 1-self._interpolant_cfg.min_t)
             if self.sample_structure:
                 # corrupt trans
                 trans_0 = torch.randn((num_batch,num_res,3), device=batch['aa'].device) * self._interpolant_cfg.trans.sigma # scale with sigma?
@@ -158,7 +162,7 @@ class FlowModel(nn.Module):
                 seqs_t_prob = seqs_1_prob.detach().clone()
 
         # denoise
-        pred_rotmats_1, pred_trans_1, pred_angles_1, pred_seqs_1_prob  = self.ga_encoder(t, rotmats_t, trans_t_c, angles_t, seqs_t, node_embed, edge_embed, gen_mask, res_mask)
+        pred_rotmats_1, pred_trans_1, pred_angles_1, pred_seqs_1_prob  = self.ga_encoder(t, rotmats_t, trans_t_c, angles_t, seqs_t, node_embed, edge_embed, gen_mask, res_mask, clock_context=clock_context)
         pred_seqs_1 = sample_from(F.softmax(pred_seqs_1_prob,dim=-1))
         pred_seqs_1 = torch.where(batch['generate_mask'],pred_seqs_1,torch.clamp(seqs_1,0,19))
         pred_trans_1_c,_ = self.zero_center_part(pred_trans_1,gen_mask,res_mask)

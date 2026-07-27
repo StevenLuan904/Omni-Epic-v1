@@ -84,7 +84,10 @@ class GAEncoder(nn.Module):
         )[:, None, :].repeat(1, mask.shape[1], 1)
         return timestep_emb
 
-    def forward(self, t, rotmats_t, trans_t, angles_t, seqs_t, node_embed, edge_embed, generate_mask, res_mask):
+    def forward(
+        self, t, rotmats_t, trans_t, angles_t, seqs_t, node_embed, edge_embed,
+        generate_mask, res_mask, clock_context=None,
+    ):
         num_batch, num_res = seqs_t.shape
 
         # incorperate current seq and timesteps
@@ -92,6 +95,9 @@ class GAEncoder(nn.Module):
         edge_mask = node_mask[:, None] * node_mask[:, :, None]
 
         node_embed = self.res_feat_mixer(torch.cat([node_embed, self.current_seq_embedder(seqs_t), self.embed_t(t,node_mask), self.angles_embedder(angles_t).reshape(num_batch,num_res,-1)],dim=-1))
+        if clock_context is not None:
+            structure_clock = clock_context["peptide_struct"][:, None, :]
+            node_embed = node_embed + structure_clock
         node_embed = node_embed * node_mask[..., None]
         curr_rigids = du.create_rigid(rotmats_t, trans_t)
         for b in range(self._ipa_conf.num_blocks):
@@ -120,7 +126,10 @@ class GAEncoder(nn.Module):
         # curr_rigids = self.rigids_nm_to_ang(curr_rigids)
         pred_trans1 = curr_rigids.get_trans()
         pred_rotmats1 = curr_rigids.get_rots().get_rot_mats()
-        pred_seqs1_prob = self.seq_net(node_embed)
+        sequence_embed = node_embed
+        if clock_context is not None:
+            sequence_embed = sequence_embed + clock_context["peptide_seq"][:, None, :]
+        pred_seqs1_prob = self.seq_net(sequence_embed)
         pred_angles1 = self.angle_net(node_embed)
         pred_angles1 = pred_angles1 % (2*math.pi) # inductive bias to bound between (0,2pi)
 
