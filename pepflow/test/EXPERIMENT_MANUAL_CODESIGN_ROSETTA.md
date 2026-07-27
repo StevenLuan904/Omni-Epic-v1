@@ -2,62 +2,61 @@
 
 ## 目标
 
-在异步 peptide/receptor flow 通过小数据过拟合后，开启 peptide sequence
-生成，使模型同时输出 peptide sequence、peptide structure 和适配后的
-receptor pocket，并用 Rosetta 对生成复合物进行独立结合能验证。
+在异步 peptide/receptor flow 通过小数据过拟合后，联合生成 peptide sequence、
+peptide structure 和适配后的 receptor pocket。设计任务不存在对应 native complex，
+因此 Rosetta 只计算每个生成复合物的绝对界面 ΔG proxy，并以更低（更负）的 ΔG
+进行筛选，不计算 ΔΔG。
 
-## 输入与模型
+所有模型、schedule、sampling、loss 和 Rosetta 参数统一读取
+`pepflow/configs/joint_async_codesign.yaml`；运行时只指定 YAML 路径和输入/输出路径。
 
-- 输入：anchor receptor、masked peptide sequence、peptide 初始结构/噪声。
-- 保留：PepFlow peptide structure flow、DynamicBind receptor flow、条件
-  adapter 和异步 `t_p/t_r` 时间轴。
-- 新增：轻量 peptide sequence head（categorical denoising/flow），输出每个
-  residue 的 amino-acid logits；sequence embedding 作为 peptide structure
-  flow 的条件，同时生成结构再反馈 pocket context。
-- 训练参数分阶段打开：先冻结已有两条 flow，仅训练 sequence head；再解冻
-  adapter 与 receptor flow，最后才允许 PepFlow structure 层微调。
+## 模型
 
-## 小数据过拟合流程
+- 保留 PepFlow peptide structure flow、DynamicBind receptor flow、condition adapter
+  和多时钟 time-token encoder。
+- 新增 peptide sequence categorical flow/head，输出 amino-acid logits。
+- 当前 codesign 阶段 `peptide_seq` 与 `peptide_struct` 仍共享 `peptide` clock；两个
+  peptide 模块都显式注入 peptide/receptor time embeddings。
+- receptor module 同样显式注入 receptor/peptide time embeddings。未来需要内部异步
+  时，将 `peptide` 拆为 `peptide_seq`、`peptide_struct` 两个命名 token 即可。
+- 分阶段解冻：sequence head → adapter/receptor flow → PepFlow structure layers。
 
-1. 选择 1 个 case 做 sequence+structure smoke，确认 mask 后仍能反向传播。
-2. 使用 4--8 个 case 做 codesign overfit；mask 15%、30%、50% 三个比例。
-3. 使用全部 40 对配对做正式小数据过拟合，并保留 random、peptide-cluster、
-   receptor-family proxy 的独立评估清单。
-4. 每个 peptide 生成多个 sequence/structure samples，按 sequence logits、
-   structure score 和 Rosetta 分数排序；不得只报告单个幸运样本。
+## 小数据过拟合
+
+1. 1 个 case 做 sequence+structure backward smoke。
+2. 4--8 个 case 使用 15%、30%、50% sequence masking 做 overfit。
+3. 全部 40 对配对训练；每个 receptor 生成多个 sequence/structure samples，不只
+   报告单个最低能量样本。
+4. 训练集可报告 masked sequence recovery；真正 design evaluation 不使用 recovery
+   或 native RMSD，因为该任务没有 native design。
 
 ## 损失
 
-- sequence cross-entropy / categorical flow loss（仅对 masked residues）；
-- peptide backbone/frame/torsion flow loss；
-- receptor translation/rotation/χ flow loss；
-- correct-state ranking 与 minimal-relaxation；
-- peptide/receptor shuffle 和 zero-condition controls；
-- 可选 interface-contact loss，但不得用 Rosetta 分数直接反传，避免把
-  Rosetta 当作训练标签泄漏进模型。
+- masked-residue categorical flow/cross-entropy；
+- peptide backbone/frame/torsion flow；
+- receptor translation/rotation/χ flow；
+- correct-state ranking、minimal-relaxation、shuffle/zero controls；
+- 可选 interface-contact loss。Rosetta ΔG 仅用于训练后的独立排序，不直接反传。
 
-## Rosetta 验证
+## Rosetta ΔG 验证
 
-对每个生成复合物和对应 native 复合物使用完全相同的 Rosetta protocol：
-结构清理、约束、侧链 repack/minimization、`InterfaceAnalyzer`。至少保存：
+所有生成复合物使用完全相同的结构清理、side-chain repack/minimization 和
+`InterfaceAnalyzer` protocol。将 `dG_separated` 作为 Rosetta 界面 ΔG proxy，
+数值越低越好。至少保存：
 
-- `dG_separated`（Rosetta interface binding-energy proxy）；
-- `dSASA_int`、interface contacts、shape complementarity；
-- generated 与 native 的 `ΔΔG = dG_generated - dG_native`；
-- peptide backbone RMSD、sequence recovery、pocket RMSD；
-- Rosetta 失败原因和未收敛样本数。
+- 每个有效 sample 的 ΔG（`dG_separated`）；
+- ΔG 的均值、中位数、分位数、最低值及 top-k 分布；
+- `dSASA_int`、interface contacts、shape complementarity、clash/strain；
+- peptide 几何有效性、序列多样性和相对 anchor 的 pocket movement；
+- Rosetta 失败原因、有效结构数和失败率。
 
 ## 通过标准
 
-- masked sequence recovery 明显高于随机基线，并且结构没有退化；
-- 生成 peptide pose/pocket RMSD 相对 anchor 改善；
-- top-ranked samples 中，Rosetta `dG_separated` 不显著差于 native，且
-  `ΔΔG`、interface contacts、dSASA 与结构指标方向一致；
-- shuffle/zero peptide 后 sequence ranking、结构 ranking 和 Rosetta
-  interface 质量同步下降；
-- 所有结论同时报告生成样本数、有效结构数、Rosetta 失败率和均值/中位数，
-  不用单个最低能量样本宣称成功。
+- 小数据 masked sequence recovery 明显高于随机基线，且联合结构 flow 能稳定收敛；
+- design samples 具有合理 peptide 几何、低 clash、有效界面和受控 pocket movement；
+- 多个独立生成样本取得稳定偏低的 Rosetta ΔG，而不是只出现一个偶然低值；
+- 模型排序与 Rosetta ΔG、interface contacts、dSASA 的方向具有统计相关性；
+- shuffle/zero peptide 条件后，结构质量、模型 ranking 和 Rosetta ΔG 分布恶化。
 
-Rosetta 结果是独立验证，不等同于实验亲和力；本手册验证的是小数据
-codesign 闭环和排序能力，不是大规模新序列泛化。apo/AlphaFold anchor
-需要数据集整理完成后另行加入。
+Rosetta ΔG 是计算能量 proxy，不等同于实验结合自由能；本实验验证小数据 codesign
+闭环和候选排序能力，不宣称大规模新序列泛化。

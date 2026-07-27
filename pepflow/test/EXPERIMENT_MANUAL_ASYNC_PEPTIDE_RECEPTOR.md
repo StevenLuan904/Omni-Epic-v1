@@ -2,53 +2,63 @@
 
 ## 目标
 
-在现有 80 个真实 cross-holo 状态上验证：peptide flow 与 receptor flow
-可以使用不同的 flow time/积分步长异步推进，并通过条件 adapter 联合优化。
-peptide 内部的 sequence embedding、backbone/frame、torsion 暂时仍使用同一
-个 peptide clock，不拆成异步子流。
+在现有 80 个真实 cross-holo 状态上验证 peptide flow 与 receptor flow 的异步
+联合生成。peptide 内部的 sequence embedding、backbone/frame、torsion 暂时共享
+同一个 `peptide` clock，不拆成异步子流。
 
-## 固定设置
+所有超参数只允许来自 `pepflow/configs/joint_async_codesign.yaml`。运行入口只接收
+`--experiment-config`，不得在代码或命令行中散落 `N_p`、`N_r`、时间维度和 loss
+权重。YAML 使用命名 preset 和显式数值，首版不支持任意表达式或 `eval`；目前没有
+必须依赖表达式才能描述的 schedule，这样更安全且易于复现。
 
-- 数据：`joint-small-batch/20260727-022909+0800`，先使用 1--4 个 case 做
-  smoke，再使用全部 40 对配对过拟合。
-- 初始化：官方 PepFlow `model1.pt`、DynamicBind checkpoint；不得随机初始化
-  PepFlow 主干。
-- 参数：保持当前约 19.3M trainable parameters；sequence masking 关闭。
-- 时间轴：每个样本独立采样 `t_p`、`t_r`；建议 `N_p=2N_r`，即 peptide
-  每推进两次，receptor 推进一次。每次 receptor update 前交换一次
-  peptide embedding/pocket context。
-- 训练：每个 state 的 peptide flow loss、receptor translation/rotation/χ
-  loss、正负 endpoint ranking、minimal-relaxation、shuffle/zero control。
+## 多时钟 conditioning
 
-## 实现约束
+每个 clock 先用高维 Fourier embedding 编码，再加入 learned clock-type embedding，
+形成带名字的 time token。当前 token 集为 `{peptide, receptor}`：
 
-1. `peptide_flow(x_p,t_p)` 内部 sequence/structure 模块共享 `t_p`。
-2. `receptor_flow(x_r,t_r, adapter(h_p))` 使用独立 `t_r`；adapter 不 detach，
-   使 receptor loss 能反向更新 peptide 分支。
-3. 只在明确同步点交换条件，不把两个 flow 的状态直接拼接成一个伪状态。
-4. 记录每个 flow 的 time、step、loss 和显存；提供同步基线（`t_p=t_r`、
-   相同步数）作消融。
+- peptide module 显式接收并注入 `E(t_peptide)` 和 `E(t_receptor)`；
+- receptor module 显式接收并注入 `E(t_receptor)` 和 `E(t_peptide)`；
+- own-time、peer-time 与 state embedding 拼接后分别投影，不只放进共享 adapter；
+- time-token set 再经过小型 attention encoder，作为额外 global time context。
 
-## 生成与验收
+建议每个 scalar clock 使用 256 维 Fourier embedding、32 维 clock-type embedding，
+模块融合后投影到 512 维。未来拆分 `peptide_seq`/`peptide_struct` 时只需注册新
+clock token 和修改模块订阅列表，无需改变固定长度的双时间接口。
 
-- 从 anchor receptor + corrupted peptide 开始，按 `N_p=2N_r` 交替积分，输出
-  peptide sequence（固定输入序列）和 peptide/receptor 复合物结构。
-- 过拟合验收：训练集 peptide pose RMSD、pocket RMSD、correct-state
-  accuracy、ranking margin 均优于初始化；shuffle 后 accuracy/margin 下降；
-  receptor movement 不出现异常爆炸。
-- 异步版本相对同步基线不能显著恶化 peptide RMSD 或 pocket RMSD；若改善，
-  必须同时报告 wall time、显存峰值和每条 flow 的收敛曲线。
-- 结果目录必须保存命令、commit、GPU、time schedule、checkpoint SHA、
-  `training_metrics.csv`、`evaluation_metrics.csv`、结构文件和失败日志。
+## Flow matching 与 schedule
 
-## 必做消融
+训练时分别采样 `t_peptide`、`t_receptor` 并监督各自 vector field；推理时的
+`N_p/N_r` 只是 ODE 数值积分 schedule，不是 flow matching 本身的假设。
+`N_p=2N_r` 只有在 peptide vector field 曲率更大或 receptor 应缓慢松弛时才可能
+更好，因此不能直接设为唯一方案。
 
-| 版本 | peptide clock | receptor clock | 目的 |
-| --- | --- | --- | --- |
-| sync | 同步 | 同步 | 当前联合 flow 基线 |
-| async-2:1 | `N_p=2N_r` | 独立 `t_r` | 主实验 |
-| async-1:2 | `N_p=N_r/2` | 独立 `t_r` | 检查 receptor 慢更新是否必要 |
-| no-adapter | 独立 | 独立 | 证明条件耦合确实贡献结果 |
+首轮使用以下 preset：
 
-本实验只证明异步 peptide/receptor flow 的可训练性，不宣称 sequence
-design 或大规模泛化。
+| preset | 方法 | 用途 |
+| --- | --- | --- |
+| `sync_heun_1to1` | 同一时间网格，Heun | 同步基线 |
+| `async_strang_2to1` | receptor 半步、两次 peptide step、receptor 半步 | 推荐固定异步主实验 |
+| `async_heun_1to1` | 独立 clocks、相同步数 | 分离“异步时间”和“步数比例” |
+| `adaptive_coupled` | 各 flow 按局部误差调步，在同步点交换条件 | 后续探索 |
+
+推荐先以 `async_strang_2to1` 过拟合，因为对称 splitting 比简单“peptide 两步、
+receptor 一步”更稳定。adaptive 不一定更好：局部误差小不代表跨模块条件已经更新，
+还会增加非确定性和评估成本；只有固定 schedule 通过后才比较，并限制最大 clock
+lag、最小/最大步长和同步间隔。
+
+## 训练与验收
+
+- 初始化：官方 PepFlow `model1.pt` 和 DynamicBind checkpoint；以现有 19.3M
+  trainable parameters 为基线，新增 time encoder 参数单独统计，sequence masking 关闭。
+- 损失：peptide flow、receptor translation/rotation/χ flow、endpoint ranking、
+  minimal-relaxation、shuffle/zero controls。
+- adapter 不 detach；两个模块都显式使用两个 time embedding，receptor loss 可反向
+  更新 adapter 与允许训练的 PepFlow 层。
+- 先 1--4 个 case smoke，再使用全部 40 对配对过拟合；同步和异步版本使用相同
+  初始 checkpoint、seed 和 function-evaluation budget。
+- 验收：peptide pose、pocket RMSD、correct-state margin/accuracy 优于初始化；
+  shuffle 后选择优势下降；无 receptor movement 爆炸。
+- 必须同时报告 NFE、wall time、显存峰值、每条 flow 的误差/收敛曲线和实际同步点。
+
+本实验只验证 peptide/receptor 异步 flow 的可训练性，不宣称 sequence design 或
+大规模泛化。

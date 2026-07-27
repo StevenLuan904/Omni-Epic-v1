@@ -1,0 +1,89 @@
+schema_version: 1
+
+experiment:
+  active_stage: async_overfit  # async_overfit | codesign_overfit | codesign_sample
+  seed: 20260727
+
+clocks:
+  registry:
+    peptide:
+      components: [peptide_seq, peptide_struct]
+    receptor:
+      components: [receptor_backbone, receptor_sidechain]
+  embedding:
+    scalar_encoder: fourier
+    scalar_dim: 256
+    clock_type_dim: 32
+    fusion_dim: 512
+    fusion: token_attention
+    attention_layers: 2
+    attention_heads: 8
+  module_inputs:
+    peptide_seq: [peptide, receptor]
+    peptide_struct: [peptide, receptor]
+    receptor: [receptor, peptide]
+
+training_time:
+  sampling: independent_uniform
+  range: [0.0, 1.0]
+  synchronize_probability: 0.10
+
+sampler:
+  active_preset: async_strang_2to1
+  presets:
+    sync_heun_1to1:
+      method: coupled_heun
+      peptide_steps: 40
+      receptor_steps: 40
+      max_clock_lag: 0.0
+    async_heun_1to1:
+      method: asynchronous_heun
+      peptide_steps: 40
+      receptor_steps: 40
+      synchronize_every: 1
+    async_strang_2to1:
+      method: strang_splitting
+      peptide_steps: 40
+      receptor_steps: 20
+      order: [receptor_half, peptide, peptide, receptor_half]
+      synchronize_every: 1
+    adaptive_coupled:
+      method: adaptive_heun
+      initial_step: 0.025
+      min_step: 0.0025
+      max_step: 0.05
+      relative_tolerance: 0.01
+      absolute_tolerance: 0.001
+      max_clock_lag: 0.05
+      synchronize_every_accepted_steps: 2
+
+model:
+  baseline_trainable_parameters: 19301120
+  async_parameter_budget_max: 20000000
+  codesign_parameter_budget_max: 22000000
+  detach_adapter: false
+  sequence:
+    enabled: false
+    masking_probabilities: [0.15, 0.30, 0.50]
+    categorical_flow: true
+
+loss:
+  peptide_flow: 1.0
+  receptor_translation: 1.0
+  receptor_rotation: 0.33
+  receptor_chi: 0.33
+  endpoint_ranking: 2.0
+  ranking_margin: 0.1
+  minimal_relaxation: 0.01
+  sequence: 1.0
+  interface_contact: 0.0
+
+rosetta:
+  enabled: false
+  protocol: InterfaceAnalyzer
+  score_field: dG_separated
+  direction: minimize
+  repack: true
+  minimize: true
+  samples_per_design: 16
+  report_quantiles: [0.10, 0.25, 0.50, 0.75, 0.90]
