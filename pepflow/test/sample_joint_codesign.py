@@ -42,6 +42,59 @@ def merge_complex(receptor_path, peptide_complex_path, output_path, peptide_chai
     )
 
 
+def rigid_clash_relaxation(path, peptide_chain, settings):
+    """Resolve interface clashes by a tethered peptide rigid translation only."""
+    import torch
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    peptide_indices, peptide_xyz, receptor_xyz = [], [], []
+    for index, line in enumerate(lines):
+        if not line.startswith(("ATOM  ", "HETATM")) or len(line) < 54:
+            continue
+        xyz = [float(line[start:end]) for start, end in ((30, 38), (38, 46), (46, 54))]
+        if line[21] == peptide_chain:
+            peptide_indices.append(index)
+            peptide_xyz.append(xyz)
+        else:
+            receptor_xyz.append(xyz)
+    peptide = torch.tensor(peptide_xyz, dtype=torch.float32)
+    receptor = torch.tensor(receptor_xyz, dtype=torch.float32)
+    if not len(peptide) or not len(receptor):
+        raise ValueError("clash relaxation requires peptide and receptor atoms")
+    target = settings["target_distance_angstrom"]
+    translation = torch.zeros(3, requires_grad=True)
+    optimizer = torch.optim.Adam([translation], lr=settings["learning_rate"])
+
+    def distances():
+        delta = peptide[:, None, :] + translation[None, None, :] - receptor[None, :, :]
+        return torch.sqrt(delta.square().sum(-1) + 1e-6)
+
+    with torch.no_grad():
+        initial_clashes = int((distances() < target).sum())
+    for _ in range(settings["steps"]):
+        optimizer.zero_grad(set_to_none=True)
+        penetration = torch.relu(target - distances())
+        loss = penetration.square().sum() / len(peptide)
+        loss = loss + settings["translation_tether"] * translation.square().sum()
+        loss.backward()
+        optimizer.step()
+    with torch.no_grad():
+        final_clashes = int((distances() < target).sum())
+        relaxed = peptide + translation
+        shift = float(torch.linalg.vector_norm(translation))
+    for atom_index, line_index in enumerate(peptide_indices):
+        x, y, z = relaxed[atom_index].tolist()
+        line = lines[line_index]
+        lines[line_index] = f"{line[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{line[54:]}"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "method": "tethered_rigid_translation_clash_only_not_energy",
+        "initial_pairs_below_target": initial_clashes,
+        "final_pairs_below_target": final_clashes,
+        "translation_angstrom": shift,
+    }
+
+
 def worker(args):
     from argparse import Namespace
     from functools import partial
@@ -234,6 +287,13 @@ def worker(args):
             complex_path,
             {"source": generated_source_chains, "output": generation["peptide_chain"]},
         )
+        relaxation = None
+        if generation["geometric_clash_relaxation"]["enabled"]:
+            relaxation = rigid_clash_relaxation(
+                complex_path,
+                generation["peptide_chain"],
+                generation["geometric_clash_relaxation"],
+            )
         generated_sequence = "".join(
             amino_acids[int(index)]
             for index in final["seqs"][sample_index][batch["generate_mask"][sample_index].cpu()]
@@ -248,6 +308,7 @@ def worker(args):
             "mean_pocket_rotation": float(
                 torch.linalg.vector_norm(receptor_rotation, dim=-1).mean()
             ),
+            "geometric_relaxation": relaxation,
         })
     unique_sequences = len({row["sequence"] for row in rows})
     summary = {
