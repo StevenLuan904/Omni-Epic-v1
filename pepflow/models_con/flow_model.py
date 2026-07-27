@@ -248,6 +248,9 @@ class FlowModel(nn.Module):
             'sequence_logits': pred_seqs_1_prob,
             'sequence_prediction': pred_seqs_1,
             'sequence_generate_mask': sequence_generate_mask,
+            'peptide_translation': pred_trans_1,
+            'peptide_rotation': pred_rotmats_1,
+            'peptide_angles': pred_angles_1,
             'peptide_time': t,
         }
     

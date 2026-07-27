@@ -148,7 +148,7 @@ def worker(args):
         "receptor_flow.res_chi_final_layer.",
     )
     for name, parameter in model.named_parameters():
-        if name.startswith(("condition_adapter.", "clock_conditioner.")) or name.startswith(peptide_prefixes) or name.startswith(receptor_prefixes):
+        if name.startswith(("condition_adapter.", "peptide_geometry_adapter.", "clock_conditioner.")) or name.startswith(peptide_prefixes) or name.startswith(receptor_prefixes):
             parameter.requires_grad = True
             selected[name] = parameter
     if not selected:

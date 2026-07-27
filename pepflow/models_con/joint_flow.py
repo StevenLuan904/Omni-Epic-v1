@@ -106,6 +106,9 @@ class JointPeptideReceptorFlow(nn.Module):
         self.condition_adapter = PeptideConditionAdapter(
             peptide_dim, receptor_scalar_dim
         )
+        self.peptide_geometry_adapter = nn.Sequential(
+            nn.Linear(4, peptide_dim), nn.SiLU(), nn.Linear(peptide_dim, peptide_dim)
+        )
         self.clock_conditioner = None
         if clock_embedding is not None:
             slot_order = tuple(clock_embedding["slot_order"])
@@ -122,10 +125,38 @@ class JointPeptideReceptorFlow(nn.Module):
                 fusion_dim=clock_embedding["fusion_dim"],
             )
 
-    def peptide_context(self, peptide_batch):
-        aa = peptide_batch["aa"].clamp(min=0, max=21)
-        residue_context = self.peptide_flow.node_embedder.aatype_embed(aa)
+    def peptide_context(
+        self, peptide_batch, sequence_prob=None, peptide_translation=None,
+    ):
+        embedding = self.peptide_flow.node_embedder.aatype_embed
+        if sequence_prob is None:
+            aa = peptide_batch["aa"].clamp(min=0, max=21)
+            residue_context = embedding(aa)
+        else:
+            residue_context = sequence_prob.softmax(-1) @ embedding.weight[:20]
         mask = peptide_batch["generate_mask"].to(residue_context.dtype)
+        if peptide_translation is None:
+            peptide_translation = peptide_batch["pos_heavyatom"][:, :, 1]
+        center = (peptide_translation * mask[..., None]).sum(1, keepdim=True) / (
+            mask.sum(1, keepdim=True)[..., None] + 1e-8
+        )
+        radius = torch.linalg.vector_norm(peptide_translation - center, dim=-1)
+        previous = torch.linalg.vector_norm(
+            peptide_translation - torch.roll(peptide_translation, 1, dims=1), dim=-1
+        )
+        following = torch.linalg.vector_norm(
+            peptide_translation - torch.roll(peptide_translation, -1, dims=1), dim=-1
+        )
+        first_index = mask.argmax(dim=1)
+        first = peptide_translation[
+            torch.arange(peptide_translation.shape[0], device=peptide_translation.device),
+            first_index,
+        ]
+        from_first = torch.linalg.vector_norm(
+            peptide_translation - first[:, None, :], dim=-1
+        )
+        geometry = torch.stack((radius, previous, following, from_first), dim=-1) / 10.0
+        residue_context = residue_context + self.peptide_geometry_adapter(geometry)
         return (residue_context * mask[..., None]).sum(1) / (
             mask.sum(1, keepdim=True) + 1e-8
         )
@@ -153,10 +184,15 @@ class JointPeptideReceptorFlow(nn.Module):
 
     def receptor_forward(
         self, peptide_batch, receptor_graph, condition_batch=None,
-        zero_condition=False, clock_context=None,
+        zero_condition=False, clock_context=None, sequence_prob=None,
+        peptide_translation=None,
     ):
         source = peptide_batch if condition_batch is None else condition_batch
-        context = self.peptide_context(source)
+        context = self.peptide_context(
+            source,
+            sequence_prob=sequence_prob,
+            peptide_translation=peptide_translation,
+        )
         with self._inject_condition(
             receptor_graph,
             context,
@@ -185,17 +221,29 @@ class JointPeptideReceptorFlow(nn.Module):
                 }
             clock_context = self.clock_conditioner(clock_times)
             peptide_time = clock_times["peptide_struct"].reshape(-1, 1)
-        peptide_losses = self.peptide_flow(
+        need_auxiliary = return_aux or self.clock_conditioner is not None
+        peptide_result = self.peptide_flow(
             peptide_batch,
             t=peptide_time,
             clock_context=clock_context,
-            return_aux=return_aux,
+            return_aux=need_auxiliary,
         )
+        if need_auxiliary:
+            peptide_losses, peptide_aux = peptide_result
+        else:
+            peptide_losses, peptide_aux = peptide_result, None
         receptor_outputs = self.receptor_forward(
-            peptide_batch, receptor_graph, clock_context=clock_context
+            peptide_batch,
+            receptor_graph,
+            clock_context=clock_context,
+            sequence_prob=(
+                None if peptide_aux is None else peptide_aux["sequence_logits"]
+            ),
+            peptide_translation=(
+                None if peptide_aux is None else peptide_aux["peptide_translation"]
+            ),
         )
         if not return_aux:
             return peptide_losses, receptor_outputs
-        peptide_losses, peptide_aux = peptide_losses
         peptide_aux['clock_times'] = clock_times
         return peptide_losses, receptor_outputs, peptide_aux
