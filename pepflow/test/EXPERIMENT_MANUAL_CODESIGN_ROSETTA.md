@@ -13,7 +13,8 @@ peptide structure 和适配后的 receptor pocket。设计任务不存在对应 
 ## 模型
 
 - 保留 PepFlow peptide structure flow、DynamicBind receptor flow、condition adapter
-  和多时钟 time-token encoder。
+  和多时钟 Fourier encoder；各 clock embedding 采用固定 slot concat + projection，
+  当前不增加 attention 模块。
 - 新增 peptide sequence categorical flow/head，输出 amino-acid logits。
 - 当前 codesign 阶段 `peptide_seq` 与 `peptide_struct` 仍共享 `peptide` clock；两个
   peptide 模块都显式注入 peptide/receptor time embeddings。

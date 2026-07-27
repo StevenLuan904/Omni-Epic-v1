@@ -15,13 +15,15 @@ clocks:
     scalar_dim: 256
     clock_type_dim: 32
     fusion_dim: 512
-    fusion: token_attention
-    attention_layers: 2
-    attention_heads: 8
+    fusion: ordered_concat_mlp
+    projection_layers: 2
+    activation: silu
+    max_clock_inputs_per_module: 4
+    inactive_clock_fill: zeros
   module_inputs:
-    peptide_seq: [peptide, receptor]
-    peptide_struct: [peptide, receptor]
-    receptor: [receptor, peptide]
+    peptide_seq: [peptide, receptor, null, null]
+    peptide_struct: [peptide, receptor, null, null]
+    receptor: [receptor, peptide, null, null]
 
 training_time:
   sampling: independent_uniform

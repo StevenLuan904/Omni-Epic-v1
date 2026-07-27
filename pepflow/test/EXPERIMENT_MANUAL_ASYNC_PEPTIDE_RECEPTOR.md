@@ -18,12 +18,14 @@
 
 - peptide module 显式接收并注入 `E(t_peptide)` 和 `E(t_receptor)`；
 - receptor module 显式接收并注入 `E(t_receptor)` 和 `E(t_peptide)`；
-- own-time、peer-time 与 state embedding 拼接后分别投影，不只放进共享 adapter；
-- time-token set 再经过小型 attention encoder，作为额外 global time context。
+- own-time、peer-time 与 state embedding 按固定顺序 concat，再经过小型 projection
+  MLP 注入各自模块，不只放进共享 adapter；当前不增加 attention 模块。
 
 建议每个 scalar clock 使用 256 维 Fourier embedding、32 维 clock-type embedding，
-模块融合后投影到 512 维。未来拆分 `peptide_seq`/`peptide_struct` 时只需注册新
-clock token 和修改模块订阅列表，无需改变固定长度的双时间接口。
+concat 后投影到 512 维。每个模块预留四个有序 clock slot，未使用 slot 填零；当前
+分别放 own-time、peer-time、两个空 slot。未来拆分 `peptide_seq`/`peptide_struct`
+时只需注册新 clock 并填入预留 slot，projection 输入维度和旧 checkpoint 接口不变。
+只有 clock 数量超过预留容量后，才另做 attention/gated fusion 消融。
 
 ## Flow matching 与 schedule
 
