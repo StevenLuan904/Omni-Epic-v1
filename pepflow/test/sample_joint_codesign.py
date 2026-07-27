@@ -48,6 +48,7 @@ def worker(args):
 
     import numpy as np
     import torch
+    from Bio.PDB import PDBParser
     from torch_geometric.data import Batch
     import yaml
 
@@ -220,7 +221,9 @@ def worker(args):
             torch.zeros((1, 3)), torch.zeros(3), None,
             receptor_translation, receptor_rotation, receptor_chi,
         )
-        receptor_structure = copy.deepcopy(base_graph.rec_pdb[0])
+        receptor_structure = PDBParser(QUIET=True).get_structure(
+            f"{case_id}_{state}_{sample_index}", str(protein_path)
+        )
         modify_pdb(receptor_structure, updated_graph)
         receptor_path = adapted_receptor_dir / f"receptor_{sample_index:03d}.pdb"
         save_protein(receptor_structure, str(receptor_path))
