@@ -7,6 +7,7 @@ experiment:
   runs:
     smoke_1case:
       split: random_complex
+      train_case_ids: [case-003-1iq5_B-5j7j_B]
       steps: 1
       cases_per_step: 1
       max_train_cases: 1
@@ -19,8 +20,13 @@ experiment:
       max_grad_norm: 10.0
     overfit_mask15:
       split: random_complex
+      train_case_ids:
+        - case-003-1iq5_B-5j7j_B
+        - case-005-2kbr_B-2lsr_B
+        - case-008-2nd0_B-6bnh_B
+        - case-012-1rzx_B-1x8s_B
       steps: 100
-      cases_per_step: 2
+      cases_per_step: 1
       max_train_cases: 4
       max_eval_cases: 1
       minimum_train_cases: 4
@@ -31,8 +37,13 @@ experiment:
       max_grad_norm: 10.0
     overfit_mask30:
       split: random_complex
+      train_case_ids:
+        - case-003-1iq5_B-5j7j_B
+        - case-005-2kbr_B-2lsr_B
+        - case-008-2nd0_B-6bnh_B
+        - case-012-1rzx_B-1x8s_B
       steps: 100
-      cases_per_step: 2
+      cases_per_step: 1
       max_train_cases: 4
       max_eval_cases: 1
       minimum_train_cases: 4
@@ -43,8 +54,13 @@ experiment:
       max_grad_norm: 10.0
     overfit_mask50:
       split: random_complex
+      train_case_ids:
+        - case-003-1iq5_B-5j7j_B
+        - case-005-2kbr_B-2lsr_B
+        - case-008-2nd0_B-6bnh_B
+        - case-012-1rzx_B-1x8s_B
       steps: 100
-      cases_per_step: 2
+      cases_per_step: 1
       max_train_cases: 4
       max_eval_cases: 1
       minimum_train_cases: 4

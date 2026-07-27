@@ -39,6 +39,8 @@ def apply_experiment_config(args):
     except KeyError as error:
         raise ValueError(f"unknown YAML run profile: {run_name}") from error
     for name, value in run.items():
+        if name == "train_case_ids":
+            continue
         if not hasattr(args, name):
             raise ValueError(f"unsupported run setting: {name}")
         setattr(args, name, value)
@@ -109,6 +111,14 @@ def worker(args):
     experiment_config = yaml.safe_load(
         Path(args.experiment_config).read_text(encoding="utf-8")
     )
+    configured_train_ids = experiment_config["experiment"]["runs"][
+        args.run_name
+    ].get("train_case_ids")
+    if configured_train_ids is not None:
+        unknown = set(configured_train_ids) - set(train_candidates)
+        if unknown:
+            raise ValueError(f"configured train cases are outside split: {sorted(unknown)}")
+        train_candidates = configured_train_ids
     peptide_flow = FlowModel(config.model)
     pep_checkpoint = torch.load(args.pepflow_checkpoint, map_location="cpu")
     peptide_flow.load_state_dict(process_dic(pep_checkpoint.get("model", pep_checkpoint)), strict=True)
